@@ -62,6 +62,7 @@ function applyTerrain(
       type: "raster-dem",
       tiles,
       tileSize: 256,
+      minzoom: 7,
       maxzoom: 15,
       bounds,
       encoding: "terrarium",

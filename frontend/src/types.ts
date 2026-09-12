@@ -97,7 +97,7 @@ export interface QuakeResult {
   scenario: EarthquakeScenario;
   zones: FeatureCollection;
   bands: string[];
-  area_km2: number;
+  area_km2: Record<string, number>;
   radii_km?: Record<string, number>;
   exposure: ExposureReport;
 }

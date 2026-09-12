@@ -156,6 +156,7 @@ def simulate_earthquake(scenario: EarthquakeScenario) -> dict:
         "zones": {"type": "FeatureCollection", "features": zones_features},
         "bands": result["bands"],
         "area_km2": result["area_km2"],
+        "radii_km": result["radii_km"],
         "exposure": exposure.evaluate(grid, assets, hazard),
     }
 

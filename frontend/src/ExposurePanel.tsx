@@ -79,14 +79,23 @@ export default function ExposurePanel() {
   }
 
   // earthquake
-  const { bands, area_km2 } = result;
+  const { bands, area_km2, radii_km } = result;
+  const footprintKm2 = Object.values(area_km2).reduce((a, b) => a + b, 0);
+  const radiiNote =
+    radii_km && Object.keys(radii_km).length > 0 ? (
+      <div className="mini-note">
+        Estimated band reach: ~{radii_km.high ?? 0} km (high) · ~{radii_km.medium_high ?? 0} km
+        (medium-high) · ~{radii_km.medium ?? 0} km (medium) from the epicenter. Scenario-based
+        estimate, not a forecast.
+      </div>
+    ) : null;
   return (
     <div className="panel-body" style={{ gap: 8 }}>
       <div className="chrome-title">Estimated Shaking Intensity</div>
       <div className="stat-grid">
         <div className="stat-box">
-          <div className="num">{area_km2.toFixed(1)}</div>
-          <div className="lbl">km² higher-risk</div>
+          <div className="num">{footprintKm2.toFixed(1)}</div>
+          <div className="lbl">km² estimated footprint</div>
         </div>
         <div className="stat-box">
           <div className="num">{bands.length}</div>
@@ -95,12 +104,13 @@ export default function ExposurePanel() {
       </div>
       <div className="legend-row">
         <span className="swatch" style={{ background: "#E34B4B" }} />
-        <span>high</span>
+        <span>high · {area_km2.high?.toFixed(1)} km²</span>
         <span className="swatch" style={{ background: "#E59B45" }} />
-        <span>medium-high</span>
+        <span>medium-high · {area_km2.medium_high?.toFixed(1)} km²</span>
         <span className="swatch" style={{ background: "#E6C66A" }} />
-        <span>medium</span>
+        <span>medium · {area_km2.medium?.toFixed(1)} km²</span>
       </div>
+      {radiiNote}
       {mode === "new" && placed.length > 0 && <PlannedVerdicts result={result} />}
     </div>
   );
