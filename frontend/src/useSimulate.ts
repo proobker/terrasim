@@ -29,6 +29,8 @@ export function useSimulate() {
   const quakeDepthKm = useStore((s) => s.quakeDepthKm);
   const placed = useStore((s) => s.placed);
   const selectedRiverId = useStore((s) => s.selectedRiverId);
+  const source = useStore((s) => s.source);
+  const running = useStore((s) => s.running);
 
   const run = useStore((s) => s.setRunning);
   const setResult = useStore((s) => s.setResult);
@@ -72,17 +74,18 @@ export function useSimulate() {
     hazard,
     runHazard,
     canRun: Boolean(city),
-    running: useStore((s) => s.running),
+    running,
     needsAssets: mode === "new" && placed.length === 0,
     hasOrigin:
       hazard === "flood"
-        ? Boolean(selectedRiverId || useStore((s) => s.source))
-        : Boolean(useStore((s) => s.source)),
+        ? Boolean(selectedRiverId || source)
+        : Boolean(source),
   };
 }
 
 export function useRivers() {
   const city = useStore((s) => s.city);
+  const rivers = useStore((s) => s.rivers);
   const setRivers = useStore((s) => s.setRivers);
   const setError = useStore((s) => s.setError);
   const loadedFor = useRef<string | null>(null);
@@ -98,7 +101,7 @@ export function useRivers() {
     }
   }, [city, setRivers, setError]);
 
-  return { load, rivers: useStore((s) => s.rivers) };
+  return { load, rivers };
 }
 
 export function useSuitability() {
