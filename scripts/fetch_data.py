@@ -48,9 +48,11 @@ ROOT = Path(__file__).resolve().parents[1]
 BUNDLES = ROOT / "data" / "bundles"
 
 USER_AGENT = "terrasim-hackathon/0.1 (terrasim-resilience@example.com)"
+# Healthy-first: from dev machines only the mail.ru mirror answers (kumi
+# times out, overpass-api.de rejects 406). Tried once each, in this order.
 OVERPASS_ENDPOINTS = [
-    "https://overpass.kumi.systems/api/interpreter",
     "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
     "https://overpass-api.de/api/interpreter",
 ]
 OVERPASS_TIMEOUT = 40
@@ -245,11 +247,9 @@ def post_overpass(query: str, endpoint_order: list[str] | None = None, min_eleme
 
 
 def post_overpass_any(query: str, min_elements: int = 0) -> dict:
-    from random import shuffle
-
-    order = list(OVERPASS_ENDPOINTS)
-    shuffle(order)
-    return post_overpass(query, order, min_elements)
+    # Healthy-first order (see OVERPASS_ENDPOINTS): shuffling would waste a
+    # per-query timeout on a dead mirror a third of the time on dev boxes.
+    return post_overpass(query, list(OVERPASS_ENDPOINTS), min_elements)
 
 
 def fetch_facilities(bounds: list[float]) -> list[dict]:
