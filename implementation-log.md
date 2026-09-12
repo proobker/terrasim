@@ -2,6 +2,24 @@
 
 Status ledger for terrasim. Most recent at the top. `plans.md` is the spec; this file records what physically exists and what was verified.
 
+## 2026-09-12 — Water normalisation: fragmented OSM rivers merged into single features
+
+**Why**: flood v2 reads tributary volume off the D8 basins of mapped waterlines. OSM splits one physical river into many short, disjoint ways (Seti gaps measured up to 9 km) — as-is, one river counted as dozens of tiny tributaries and understated reach volume.
+
+**Backend (`scripts/fetch_data.py`).**
+- New `normalize_water()` stage runs after the OSM fetch and before `WATER_MAX`:
+  - Union-find over features; phase 1 snaps endpoints within ~50 m (`_SNAP_DEG`) → one component; phase 2 merges same-stem, same-family components across unmapped gaps up to 20 km (city extracts are ~20 km wide, so "same named river, anywhere in this extract").
+  - Stem keys strip generic hydronyms (`river`, `khola`, `khahare`, `nala`, ...) and apply transliteration folds (`chh→ch`, `ph→f`, `kh→k`, `gh→g`, ...) so transliterated variants still match. Devanagari-only names stay exact-only — "(क)"/"(ख)" branch markers are real distinct watercourses.
+  - Canals are a separate family and never absorb `river`/`stream` ways; unnamed segments only join a group when they share a snap point (connect-only adoption). Canonical display name = longest-segment member.
+  - New `--normalize-water` CLI flag re-runs it on committed bundles with no network (`normalize_existing()`); existing full `build_city` path calls it too.
+- Merged output actually shrunk the committed `WATER_MAX` headroom, but the point is fidelity, not count:
+  - **kathmandu** `water.geojson`: 206 → 114 features.
+  - **pokhara** `water.geojson`: 300 → 210 features.
+
+**Docs.** None beyond this entry — plans.md §8 already matches the flood v2 model this underpins.
+
+**Verified live.** `cd backend && uv run --group dev python ../scripts/fetch_data.py --normalize-water` on the committed bundles re-emits the same counts (kathmandu 114, pokhara 210) and the same feature geometries — but in a different order, so it is count-stable, not byte-identical. Re-run only when you intend to rewrite a bundle; bundles are committed in their build order and the revert path is `git checkout -- data/bundles/<id>/water.geojson`.
+
 ## 2026-09-12 - Flood engine v2: transient, volume-conserving, tributary-aware
 
 **Why**: the graded-surface flood ("raise the whole channel, pond-fill the basin") read as one flat blob no matter the river. Replaced with a researched, simpler-but-directional routing model and surfaced the resulting volume in the UI.

@@ -9,9 +9,10 @@ Follow **README.md** (backend `uv sync` + uvicorn; frontend `npm install` + `npm
 ## Making a change
 
 1. Check the definition of done in `AGENTS.md` — every change ships with tests passing, typecheck + build passing, and the affected demo flow still walking.
-2. Backend physics goes in `backend/app/engine/` as pure functions (no I/O); route glue lives in `app/main.py`.
-3. Frontend keeps the FireRed chrome (`src/index.css`, palette in plans.md §39). No "stock dashboard" styling.
-4. Honesty framing is load-bearing: new UI strings and API fields say *estimated / hypothetical / scenario-based / candidate*, never *predicted damage / will collapse*.
+2. Update `implementation-log.md` in the same change: newest entry at the top, dated, grounded in what you actually built and verified (concrete numbers, not prose). Write it from the diff, mirroring the existing entry format. A code change without its log entry is not done.
+3. Backend physics goes in `backend/app/engine/` as pure functions (no I/O); route glue lives in `app/main.py`.
+4. Frontend keeps the FireRed chrome (`src/index.css`, palette in plans.md §39). No "stock dashboard" styling.
+5. Honesty framing is load-bearing: new UI strings and API fields say *estimated / hypothetical / scenario-based / candidate*, never *predicted damage / will collapse*.
 
 ## Tests
 
@@ -30,4 +31,5 @@ cd frontend && npm run build
 ## Bugs and PRs
 
 - A runnable but wrong demo output is a bug. Empty overlay, `dry` mishandled, or a half-painted layer are not acceptable fallbacks.
+- Every PR updates `implementation-log.md` — land the entry with the code, not after the fact.
 - Prefer one focused commit per fix with a `type: summary` subject (matching existing history).
