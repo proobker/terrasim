@@ -23,12 +23,17 @@ Attribution:
 from __future__ import annotations
 
 import argparse
+import difflib
 import io
 import json
 import math
+import re
 import time
+import unicodedata
 import urllib.parse
 import urllib.request
+from collections import defaultdict
+from itertools import combinations
 from pathlib import Path
 
 import numpy as np
@@ -311,6 +316,359 @@ def filter_buildings(features: list[dict], max_area_m2: float = 40.0) -> list[di
 
 
 # ---------------------------------------------------------------------------
+# Water normalisation: merge river fragments, unify naming
+# ---------------------------------------------------------------------------
+
+_SNAP_DEG = 50.0 / 111320.0      # ~50 m in degrees
+# Same-stem, same-name fragments are one physical river even where OSM has
+# unmapped gaps (measured gaps: Seti up to 9 km). City bounds are only ~20 km
+# wide, so 20 km means "any same-named fragments in this extract merge".
+_SAME_STEM_MERGE_M = 20_000.0
+_FUZZY_RATIO = 0.85                # min difflib.SequenceMatcher ratio for fuzzy stem match
+# Folded forms included (khola->kola etc. after aspirate fold)
+_HYDRONYMS = frozenset({
+    "river", "khola", "kholso", "nadi", "nahar",
+    "nala", "gandaki", "khahare", "kulo",
+    "kola", "kolso", "kahare",
+})
+# Aspirate/double-consonant transliteration folds (applied sequentially)
+_TRANS_FOLDS = [("chh", "ch"), ("tth", "t"), ("ph", "f"), ("kh", "k"), ("gh", "g")]
+
+
+def _water_stem(name: str | None) -> tuple[str | None, str]:
+    """Normalise a waterway name to a merge key (stem) and display form.
+
+    Returns ``(None, "")`` for unnamed features.  Devanagari-only names use
+    their full lowercase form (bracket markers like ``(क)`` preserved).  Latin
+    names are transliteration-folded and stripped of generic hydronyms.
+    """
+    if not name or not name.strip():
+        return None, ""
+    raw = name.strip()
+
+    # Devanagari-only: keep full name as stem (honest; distinct branches stay separate)
+    has_ascii = any("a" <= c.lower() <= "z" for c in raw)
+    if not has_ascii:
+        return raw.lower(), raw
+
+    # Latin path
+    s = unicodedata.normalize("NFD", raw)
+    s = "".join(c for c in s if ord(c) < 128).lower().strip()
+    s = re.sub(r"\(.*?\)", " ", s).strip()
+    for src, dst in _TRANS_FOLDS:
+        s = s.replace(src, dst)
+    tokens = s.split()
+    if not tokens:
+        return raw.lower(), raw
+    filtered = [t for t in tokens if t not in _HYDRONYMS]
+    stem = " ".join(filtered) if filtered else " ".join(tokens)
+    return stem, raw
+
+
+def _line_endpoints(geometry: dict) -> list[tuple[float, float]]:
+    coords = geometry.get("coordinates", [])
+    gtype = geometry.get("type")
+    out: list[tuple[float, float]] = []
+    if gtype == "LineString" and coords:
+        out.append(tuple(coords[0][:2]))
+        out.append(tuple(coords[-1][:2]))
+    elif gtype == "MultiLineString":
+        for part in coords:
+            if part:
+                out.append(tuple(part[0][:2]))
+                out.append(tuple(part[-1][:2]))
+    return out
+
+
+def _count_segs(geometry: dict) -> int:
+    coords = geometry.get("coordinates", [])
+    gtype = geometry.get("type")
+    if gtype == "LineString":
+        return max(0, len(coords) - 1)
+    if gtype == "MultiLineString":
+        return sum(max(0, len(part) - 1) for part in coords)
+    return 0
+
+
+def _dist_m(a: tuple[float, float], b: tuple[float, float]) -> float:
+    return math.hypot(a[0] - b[0], a[1] - b[1]) * 111320.0
+
+
+def _has_deva(s: str) -> bool:
+    return any(ord(c) > 127 for c in s)
+
+
+def _stem_compatible(a: str, b: str) -> bool:
+    if a == b:
+        return True
+    if not a or not b:
+        return False
+    # Devanagari stems match exactly only: "(क)" / "(ख)" branch markers are real
+    # distinct watercourses, and transliteration variance does not apply.
+    if _has_deva(a) or _has_deva(b):
+        return False
+    # prefix match (e.g. "seti" matches "seti gandaki")
+    if a.startswith(b) or b.startswith(a):
+        return True
+    if len(a) >= 4 and len(b) >= 4:
+        if difflib.SequenceMatcher(None, a, b).ratio() >= _FUZZY_RATIO:
+            return True
+    return False
+
+
+def _emit_group(
+    member_indices: list[int],
+    feat_meta: list[dict],
+    features: list[dict],
+    out: list[dict],
+) -> None:
+    """Emit a single merged feature from a group of member indices."""
+    all_parts: list[list] = []
+    for i in member_indices:
+        geom = features[i].get("geometry", {})
+        coords = geom.get("coordinates", [])
+        gtype = geom.get("type")
+        if gtype == "LineString" and coords:
+            all_parts.append(coords)
+        elif gtype == "MultiLineString":
+            all_parts.extend(coords)
+    if not all_parts:
+        return
+
+    best_i = max(member_indices, key=lambda i: feat_meta[i]["segs"])
+    canonical_name = feat_meta[best_i]["disp"] or feat_meta[best_i]["name_raw"]
+
+    type_segs: dict[str, int] = defaultdict(int)
+    for i in member_indices:
+        t = feat_meta[i]["waterway"] or "river"
+        type_segs[t] += feat_meta[i]["segs"]
+    dominant_type = max(type_segs, key=type_segs.get)
+
+    if len(all_parts) == 1:
+        geometry = {"type": "LineString", "coordinates": all_parts[0]}
+    else:
+        geometry = {"type": "MultiLineString", "coordinates": all_parts}
+
+    props: dict = {
+        "name": canonical_name,
+        "waterway": dominant_type,
+        "id": features[best_i]["properties"].get("id"),
+        "type": dominant_type,
+    }
+    out.append({"type": "Feature", "properties": props, "geometry": geometry})
+
+
+def normalize_water(features: list[dict]) -> list[dict]:
+    """Merge water features that are segments of the same physical river.
+
+    Same-stem + same-family features within 1 km (or sharing a snap-point)
+    become one MultiLineString.  Unnamed segments join a named group only
+    when they share a snap-point (connect-only adoption).
+    """
+    if not features:
+        return features
+
+    meta: list[dict] = []
+    for f in features:
+        props = f.get("properties", {})
+        name = props.get("name")
+        waterway = props.get("waterway", "river")
+        stem, disp = _water_stem(name)
+        family = "canal" if waterway == "canal" else "water"
+        meta.append({
+            "stem": stem,
+            "disp": disp,
+            "family": family,
+            "points": _line_endpoints(f.get("geometry", {})),
+            "segs": _count_segs(f.get("geometry", {})),
+            "name_raw": name,
+            "waterway": waterway,
+        })
+
+    n = len(meta)
+
+    # -- union-find -------------------------------------------------------
+    parent = list(range(n))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    # -- phase 1: snap connectivity (all features, 50 m) -----------------
+    grid: dict[tuple[int, int], int] = {}
+    for i, m in enumerate(meta):
+        for pt in m["points"]:
+            gx, gy = int(round(pt[0] / _SNAP_DEG)), int(round(pt[1] / _SNAP_DEG))
+            for dx in range(-1, 2):
+                for dy in range(-1, 2):
+                    j = grid.get((gx + dx, gy + dy))
+                    if j is not None and j != i:
+                        union(i, j)
+            grid[(gx, gy)] = i
+
+    # -- phase 2: compat-stem 1 km gap (named features only) --------------
+    stem_feats: dict[str | None, list[int]] = defaultdict(list)
+    for i, m in enumerate(meta):
+        if m["stem"] is not None:
+            stem_feats[m["stem"]].append(i)
+
+    # build compat sets among stems
+    stem_keys = [k for k in stem_feats if k is not None]
+    compat_map: dict[str, set[str]] = defaultdict(set)
+    for a, b in combinations(stem_keys, 2):
+        if _stem_compatible(a, b):
+            compat_map[a].add(b)
+            compat_map[b].add(a)
+
+    visited: set[str] = set()
+    for sk in stem_keys:
+        if sk in visited:
+            continue
+        # BFS compat cluster
+        cluster: set[str] = set()
+        queue = [sk]
+        while queue:
+            s = queue.pop()
+            if s in cluster:
+                continue
+            cluster.add(s)
+            visited.add(s)
+            for nb in compat_map.get(s, set()):
+                if nb not in cluster:
+                    queue.append(nb)
+
+        cluster_idx = [i for s in cluster for i in stem_feats[s]]
+        if len(cluster_idx) < 2:
+            continue
+
+        # bucket by UF component
+        comp_buckets: dict[int, list[int]] = defaultdict(list)
+        for i in cluster_idx:
+            comp_buckets[find(i)].append(i)
+        bucket_list = list(comp_buckets.values())
+        if len(bucket_list) < 2:
+            continue
+
+        # min gap between each pair of buckets
+        def _min_gap(a: list[int], b: list[int]) -> float:
+            pts_a = [pt for i in a for pt in meta[i]["points"]]
+            pts_b = [pt for i in b for pt in meta[i]["points"]]
+            best = float("inf")
+            for pa in pts_a:
+                for pb in pts_b:
+                    d = _dist_m(pa, pb)
+                    if d < best:
+                        best = d
+                        if best <= _SAME_STEM_MERGE_M:
+                            return best
+            return best
+
+        for i, j in combinations(range(len(bucket_list)), 2):
+            if _min_gap(bucket_list[i], bucket_list[j]) <= _SAME_STEM_MERGE_M:
+                union(bucket_list[i][0], bucket_list[j][0])
+
+    # -- phase 3: emit ----------------------------------------------------
+    uf_groups: dict[int, list[int]] = defaultdict(list)
+    for i in range(n):
+        uf_groups[find(i)].append(i)
+
+    # pre-compute global canonical display per stem
+    stem_best_disp: dict[str, str] = {}
+    for stem, idxs in stem_feats.items():
+        if not stem:
+            continue
+        best = max(idxs, key=lambda i: meta[i]["segs"])
+        stem_best_disp[stem] = meta[best]["disp"] or meta[best]["name_raw"]
+
+    out: list[dict] = []
+    for members in uf_groups.values():
+        stems_present = {meta[i]["stem"] for i in members}
+        named_stems = [s for s in stems_present if s is not None]
+        has_unnamed = None in stems_present
+
+        if not named_stems:
+            # fully unnamed component: keep each way as-is
+            for i in members:
+                out.append(features[i])
+            continue
+
+        # partition named stems into compatibility groups
+        stem_parent = {s: s for s in named_stems}
+
+        def sfind(s: str) -> str:
+            while stem_parent[s] != s:
+                stem_parent[s] = stem_parent[stem_parent[s]]
+                s = stem_parent[s]
+            return s
+
+        def sunion(a: str, b: str) -> None:
+            ra, rb = sfind(a), sfind(b)
+            if ra != rb:
+                stem_parent[rb] = ra
+
+        for a, b in combinations(named_stems, 2):
+            if _stem_compatible(a, b):
+                sunion(a, b)
+
+        compat_groups: dict[str, list[str]] = defaultdict(list)
+        for s in named_stems:
+            compat_groups[sfind(s)].append(s)
+
+        # group members per compat group; unnamed go to the dominant group
+        group_members: dict[str, list[int]] = defaultdict(list)
+        group_segs: dict[str, int] = defaultdict(int)
+        for root, stems in compat_groups.items():
+            member_idxs = [i for i in members if meta[i]["stem"] in stems]
+            group_members[root] = member_idxs
+            group_segs[root] = sum(meta[i]["segs"] for i in member_idxs)
+        dominant = max(group_segs, key=group_segs.get)
+
+        # canonical display name per compat group (unify casing/spelling)
+        canon: dict[str, str] = {}
+        for root, stems in compat_groups.items():
+            member_idxs = group_members[root]
+            rep = max(
+                stems,
+                key=lambda s: sum(meta[i]["segs"] for i in member_idxs if meta[i]["stem"] == s),
+            )
+            canon[root] = stem_best_disp.get(rep) or stem_best_disp[stems[0]]
+
+        for root, stems in compat_groups.items():
+            # partition by family so canals never absorb {river,stream} ways
+            fam: dict[str, list[int]] = defaultdict(list)
+            fam_names: set[str] = set()
+            for i in group_members[root]:
+                fam[meta[i]["family"]].append(i)
+                fam_names.add(meta[i]["family"])
+            if root == dominant and has_unnamed:
+                for i in members:
+                    if meta[i]["stem"] is None and meta[i]["family"] in fam_names:
+                        fam[meta[i]["family"]].append(i)
+                has_unnamed = False
+            for family, idxs in fam.items():
+                named_idx = [i for i in idxs if meta[i]["stem"] is not None]
+                if not named_idx:
+                    # only unnamed ways in this family: keep them individual
+                    out.extend(features[i] for i in idxs)
+                    continue
+                rep = max(named_idx, key=lambda i: meta[i]["segs"])
+                rep_stem = meta[rep]["stem"]
+                canon = stem_best_disp.get(rep_stem) or stem_best_disp[rep_stem]
+                for i in idxs:
+                    meta[i]["disp"] = canon
+                _emit_group(idxs, meta, features, out)
+
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Terrarium elevation tiles
 # ---------------------------------------------------------------------------
 
@@ -446,6 +804,7 @@ def build_city(city_id: str, force: bool = False) -> None:
         extra_tags=("waterway",),
         add_id=True,
     )
+    water = normalize_water(water)
     water = water[:WATER_MAX]
     facilities = to_features(osm["facilities_result"], None, True)
     facilities = facilities[:FACILITY_MAX]
@@ -484,16 +843,39 @@ def build_city(city_id: str, force: bool = False) -> None:
     print(f"[{city_id}] done -> {out}")
 
 
+def normalize_existing(city_id: str) -> int:
+    """Re-run water normalisation on a committed bundle without re-fetching."""
+    path = BUNDLES / city_id / "water.geojson"
+    fc = json.loads(path.read_text(encoding="utf-8"))
+    before = len(fc["features"])
+    fc["features"] = normalize_water(fc["features"])
+    path.write_text(json.dumps(fc), encoding="utf-8")
+    print(f"[{city_id}] water: {before} -> {len(fc['features'])} features")
+    return len(fc["features"])
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build terrasim demo data bundles.")
     parser.add_argument("--all", action="store_true", help="build every configured city")
     parser.add_argument("--city", help="build a single city by id")
+    parser.add_argument(
+        "--normalize-water",
+        action="store_true",
+        help="re-run water normalization on existing bundles (no network)",
+    )
     args = parser.parse_args()
 
     BUNDLES.mkdir(parents=True, exist_ok=True)
     targets = list(CITIES) if args.all else ([args.city] if args.city else [])
+    if args.normalize_water:
+        targets = (targets or list(CITIES))
+        for city_id in targets:
+            if city_id not in CITIES:
+                parser.error(f"unknown city: {city_id}")
+            normalize_existing(city_id)
+        return
     if not targets:
-        parser.error("pass --all or --city <id>")
+        parser.error("pass --all, --city <id>, or --normalize-water")
     for city_id in targets:
         if city_id not in CITIES:
             parser.error(f"unknown city: {city_id}")
