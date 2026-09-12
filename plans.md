@@ -425,6 +425,14 @@ It does not automatically account for every factor such as:
 -   detailed channel hydraulics
 -   time-dependent water movement
 
+The flood engine is **flow-routed**: a D8 steepest-descent direction raster
+routes water downstream, and the modelled water surface for a river source
+rises by the user's level *above each reach's local channel bed* (a graded
+surface) rather than above a single flat level. Ponds backfill connected
+low ground below the carried surface. This makes the extent follow the
+selected river's flow path — different rivers, different extents — while
+remaining a deliberate simplification.
+
 Therefore, call it:
 
 > **Terrain-based hypothetical flood extent**

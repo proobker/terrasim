@@ -13,6 +13,7 @@ import pytest
 
 import app.datasets as datasets
 from app.engine import earthquake, exposure, flood, suitability, terrain_tiles
+from app.engine.grid import DemGrid
 
 
 def make_city_bundle(tmp_path: Path, city_id: str = "testcity", n: int = 24) -> Path:
@@ -162,8 +163,8 @@ def test_river_flood_seeds_channel_and_rises(city):
     centre_r, centre_c = grid.cell(*datasets.city_meta(city.name)["center"])
 
     mask, surface = flood.river_flood_mask(grid, coords, level_m=2.0, mode="rise")
-    expected_surface = float(grid.elev[centre_r, centre_c]) + 2.0
-    assert surface == expected_surface
+    centre_surface = float(grid.elev[centre_r, centre_c]) + 2.0
+    assert surface > centre_surface  # graded: peak surface = highest reach + rise
     assert mask.sum() > 0
     assert mask[centre_r, centre_c]
 
@@ -175,7 +176,7 @@ def test_river_flood_dry_when_surface_below_channel(city):
     grid = datasets.load_city_dem(city.name)
     coords = datasets.line_vertices(datasets.river_geometry_by_ref(city.name, "w-1"))
     mask, surface = flood.river_flood_mask(grid, coords, level_m=5.0, mode="absolute")
-    assert surface == 5.0
+    assert surface is None
     assert mask.sum() == 0
 
     result = flood.run_river(grid, coords, level_m=5.0, mode="absolute")
@@ -189,6 +190,85 @@ def test_river_lookup_by_name_and_rivers_summary(city):
     assert rows[0]["id"] == "w-1"
     assert rows[0]["name"] == "Test River"
     assert rows[0]["type"] == "waterway"
+
+
+def test_d8_flow_direction_points_downhill():
+    # Plane rising toward the east: each non-edge cell points to a strictly
+    # lower (westward) neighbour and never uphill.
+    elev = np.tile(np.arange(8, dtype=float), (6, 1))
+    flow = flood._d8_flow_dir(elev)
+    assert (flow[:, 0] == -1).all()  # no strictly lower neighbour on the edge
+    for r in range(1, 5):  # interior rows keep D8 destinations in-bounds
+        for c in range(1, 8):
+            code = int(flow[r, c])
+            assert code >= 0
+            dr, dc = flood._NEIGH8[code]
+            nr, nc = r + dr, c + dc
+            assert 0 <= nr < 6 and 0 <= nc < 8
+            assert elev[nr, nc] == elev[r, c] - 1  # the steepest drop
+            assert dc == -1  # never chooses an uphill column
+
+
+def test_d8_flow_converges_into_pit():
+    rs, cs = np.indices((9, 9))
+    elev = np.sqrt(((rs - 4) ** 2 + (cs - 4) ** 2).astype(float))
+    flow = flood._d8_flow_dir(elev)
+    assert flow[4, 4] == -1  # the pit is a sink
+    assert int(flow[3, 4]) in (5, 6, 7)  # south rim routes toward the pit
+    assert int(flow[4, 3]) in (3, 4, 7)  # east rim routes toward the pit
+
+
+def test_flow_walk_stamps_downstream_cells():
+    # Radial terrain toward a central pit: water from a rim seed walks the
+    # D8 path straight into the pit, and nothing off-path gets wet.
+    rs, cs = np.indices((9, 9))
+    elev = np.sqrt(((rs - 4) ** 2 + (cs - 4) ** 2).astype(float))
+    flow = flood._d8_flow_dir(elev)
+    seeds = np.zeros_like(elev, dtype=bool)
+    seeds[0, 4] = True
+    seed_surface = np.full(elev.shape, -np.inf)
+    seed_surface[0, 4] = elev[0, 4]
+    surf = flood._surface_seed(elev, flow, seeds, seed_surface)
+    assert surf[4, 4] == elev[0, 4]  # reached the pit downstream
+    assert surf[3, 4] == elev[0, 4]
+    assert surf[0, 3] == -np.inf     # off-path cell stays dry
+    assert surf[1, 5] == -np.inf
+
+
+def test_point_source_floods_downhill_not_uphill():
+    # Terrain falls from north (row 0, high) to south (row n-1, low).
+    n = 20
+    res = 0.05
+    elev = ((n - np.indices((n, n))[0]).astype(float) * 0.5).astype(np.float32)
+    grid = DemGrid(elev, 85.0, 27.0, res, res)
+    mask, _ = flood.flood_mask(grid, *grid.cell_center(6, 10), level_m=0.5, mode="rise")
+    assert mask[6, 10]
+    assert mask.sum() > 0
+    assert mask[15, 10]
+    assert mask[:5, :].sum() == 0  # uphill of the source stays dry
+
+
+def test_rivers_in_separate_valleys_stay_disjoint_until_overtopped():
+    # Flat DEM with a high N-S ridge splitting it into two valleys.
+    n = 20
+    res = 0.05
+    elev = np.full((n, n), 10.0, dtype=np.float32)
+    elev[:, 10:12] = 80.0  # the ridge
+    grid = DemGrid(elev, 85.0, 27.0, res, res)
+
+    coords_a = [(85.0 + 3 * res, 27.0 + 5 * res), (85.0 + 5 * res, 27.0 + 5 * res)]
+    coords_b = [(85.0 + 15 * res, 27.0 + 5 * res), (85.0 + 17 * res, 27.0 + 5 * res)]
+
+    mask_a, _ = flood.river_flood_mask(grid, coords_a, level_m=1.0, mode="rise")
+    mask_b, _ = flood.river_flood_mask(grid, coords_b, level_m=1.0, mode="rise")
+    assert mask_a.sum() > 0 and mask_b.sum() > 0
+    assert not (mask_a & mask_b).any()          # ridge keeps them separate
+    assert mask_a[:, 10:].sum() == 0            # A confined to its valley
+    assert mask_b[:, :12].sum() == 0            # B confined to its valley
+
+    big_a, _ = flood.river_flood_mask(grid, coords_a, level_m=90.0, mode="rise")
+    assert big_a[:, 10:12].sum() > 0            # overtopped ridge floods both sides
+    assert big_a.sum() > mask_a.sum()
 
 
 def test_quake_intensity_decays_with_distance(city):
