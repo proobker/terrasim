@@ -46,6 +46,44 @@ def test_flood_uses_planned_assets():
         assert any(h["id"] == "plan-1" for h in hits) or len(body["exposure"]["assets"]) == 1
 
 
+def test_flood_requires_exactly_one_origin():
+    r = client.post("/api/simulate/flood", json={"city_id": "kathmandu", "level_m": 3.0})
+    assert r.status_code == 422
+    r = client.post(
+        "/api/simulate/flood",
+        json={
+            "city_id": "kathmandu",
+            "source": {"lng": 85.34, "lat": 27.71},
+            "river_id": "something",
+            "level_m": 3.0,
+        },
+    )
+    assert r.status_code == 422
+
+
+def test_river_flood_and_unknown_river():
+    rivers = client.get("/api/cities/kathmandu/rivers")
+    assert rivers.status_code == 200
+    rows = rivers.json()["rivers"]
+    if not rows:
+        return  # bundle was built without a water layer; nothing to exercise
+    river = rows[0]
+    r = client.post(
+        "/api/simulate/flood",
+        json={"city_id": "kathmandu", "river_id": river["id"], "level_m": 2.0, "mode": "rise"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["kind"] == "flood"
+    assert body["scenario"]["river_id"] == river["id"]
+
+    r = client.post(
+        "/api/simulate/flood",
+        json={"city_id": "kathmandu", "river_id": "river-that-does-not-exist", "level_m": 2.0},
+    )
+    assert r.status_code == 404
+
+
 def test_quake_uses_planned_assets():
     r = client.post(
         "/api/simulate/earthquake",

@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { AssetType, CityInfo, HazardKind, PlannedAsset, SimResult, SuitabilityResult } from "./types";
+import type { AssetType, CityInfo, HazardKind, PlannedAsset, RiverSummary, SimResult, SuitabilityResult } from "./types";
 
 export type BootState = "loading" | "error" | "ready";
 
@@ -16,6 +16,8 @@ interface TerrasimState {
   quakeDepthKm: number;
 
   source: { lng: number; lat: number } | null;
+  rivers: RiverSummary[];
+  selectedRiverId: string | null;
   result: SimResult | null;
   running: boolean;
   runCount: number;
@@ -43,6 +45,8 @@ interface TerrasimState {
   setQuakeMagnitude: (v: number) => void;
   setQuakeDepthKm: (v: number) => void;
   setSource: (lng: number, lat: number) => void;
+  setRivers: (rivers: RiverSummary[]) => void;
+  setSelectedRiverId: (id: string | null) => void;
   setResult: (r: SimResult | null) => void;
   setRunning: (v: boolean) => void;
   setError: (e: string | null) => void;
@@ -75,6 +79,8 @@ export const useStore = create<TerrasimState>((set) => ({
   quakeDepthKm: 10,
 
   source: null,
+  rivers: [],
+  selectedRiverId: null,
   result: null,
   running: false,
   runCount: 0,
@@ -95,13 +101,15 @@ export const useStore = create<TerrasimState>((set) => ({
 
   setCities: (cities) => set({ cities }),
   setBootState: (bootState) => set({ bootState }),
-  selectCity: (city) => set({ city, source: null, result: null, suitability: null, runCount: 0 }),
+  selectCity: (city) => set({ city, source: null, rivers: [], selectedRiverId: null, result: null, suitability: null, runCount: 0 }),
   setMode: (mode) => set({ mode, result: null }),
   setHazard: (hazard) => set({ hazard, result: null }),
   setFloodLevelM: (floodLevelM) => set({ floodLevelM }),
   setQuakeMagnitude: (quakeMagnitude) => set({ quakeMagnitude }),
   setQuakeDepthKm: (quakeDepthKm) => set({ quakeDepthKm }),
   setSource: (lng, lat) => set({ source: { lng, lat }, result: null }),
+  setRivers: (rivers) => set({ rivers }),
+  setSelectedRiverId: (selectedRiverId) => set({ selectedRiverId, result: null }),
   setResult: (result) => set((s) => ({ result, runCount: s.runCount + 1 })),
   setRunning: (running) => set({ running }),
   setError: (error) => set({ error }),

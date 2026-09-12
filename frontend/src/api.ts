@@ -4,6 +4,7 @@ import type {
   FeatureCollection,
   FloodScenario,
   LayerKind,
+  RiverSummary,
   SimResult,
   SuitabilityResult,
 } from "./types";
@@ -40,6 +41,11 @@ export const api = {
     } catch {
       return null;
     }
+  },
+
+  async rivers(cityId: string): Promise<RiverSummary[]> {
+    const data = await request<{ rivers: RiverSummary[] }>(`/api/cities/${cityId}/rivers`);
+    return data.rivers;
   },
 
   async flood(scenario: FloodScenario): Promise<SimResult> {

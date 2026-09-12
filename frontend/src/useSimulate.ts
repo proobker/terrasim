@@ -1,11 +1,12 @@
 import { api } from "./api";
 import { useStore } from "./store";
+import { useCallback, useRef } from "react";
 import type { PlannedAsset } from "./types";
 
 function pickHazardSource() {
   const s = useStore.getState();
   if (s.source) return s.source;
-  s.setError("Set a hazard origin on the map first — tap the map to place the flood source / epicenter.");
+  s.setError("Set a hazard origin on the map first — pick a river or tap the map to place the flood source / epicenter.");
   return null;
 }
 
@@ -27,6 +28,7 @@ export function useSimulate() {
   const quakeMagnitude = useStore((s) => s.quakeMagnitude);
   const quakeDepthKm = useStore((s) => s.quakeDepthKm);
   const placed = useStore((s) => s.placed);
+  const selectedRiverId = useStore((s) => s.selectedRiverId);
 
   const run = useStore((s) => s.setRunning);
   const setResult = useStore((s) => s.setResult);
@@ -34,8 +36,9 @@ export function useSimulate() {
 
   async function runHazard() {
     if (!city) return;
-    const origin = pickHazardSource();
-    if (!origin) return;
+    const useRiver = hazard === "flood" && Boolean(selectedRiverId);
+    const origin = useRiver ? null : pickHazardSource();
+    if (!useRiver && !origin) return;
 
     const assets = mode === "new" && placed.length ? planAssets(placed) : null;
     run(true);
@@ -45,14 +48,14 @@ export function useSimulate() {
         hazard === "flood"
           ? await api.flood({
               city_id: city.id,
-              source: origin,
+              ...(useRiver ? { river_id: selectedRiverId! } : { source: origin! }),
               level_m: floodLevelM,
               mode: "rise",
               assets,
             })
           : await api.quake({
               city_id: city.id,
-              epicenter: origin,
+              epicenter: origin!,
               magnitude: quakeMagnitude,
               depth_km: quakeDepthKm,
               assets,
@@ -71,8 +74,31 @@ export function useSimulate() {
     canRun: Boolean(city),
     running: useStore((s) => s.running),
     needsAssets: mode === "new" && placed.length === 0,
-    hasSource: Boolean(useStore((s) => s.source)),
+    hasOrigin:
+      hazard === "flood"
+        ? Boolean(selectedRiverId || useStore((s) => s.source))
+        : Boolean(useStore((s) => s.source)),
   };
+}
+
+export function useRivers() {
+  const city = useStore((s) => s.city);
+  const setRivers = useStore((s) => s.setRivers);
+  const setError = useStore((s) => s.setError);
+  const loadedFor = useRef<string | null>(null);
+
+  const load = useCallback(async () => {
+    if (!city) return;
+    if (loadedFor.current === city.id && useStore.getState().rivers.length) return;
+    loadedFor.current = city.id;
+    try {
+      setRivers(await api.rivers(city.id));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }, [city, setRivers, setError]);
+
+  return { load, rivers: useStore((s) => s.rivers) };
 }
 
 export function useSuitability() {

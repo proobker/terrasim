@@ -6,6 +6,7 @@ Each city lives in ``data/bundles/<city_id>/`` and contains:
 - ``dem.meta.json``    grid georeferencing
 - ``dem.npz``          elevation raster (``elev``)
 - ``buildings.geojson`` / ``roads.geojson`` / ``facilities.geojson``
+- ``water.geojson``        river/stream/canal centerlines (LineStrings)
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ DATA_ROOT = Path(
     __import__("os").environ.get("TERRASIM_DATA", Path(__file__).resolve().parents[2] / "data" / "bundles")
 )
 
-LAYER_FILES = ("buildings.geojson", "roads.geojson", "facilities.geojson")
+LAYER_FILES = ("buildings.geojson", "roads.geojson", "facilities.geojson", "water.geojson")
 
 
 def _city_dir(city_id: str) -> Path:
@@ -55,8 +56,8 @@ def load_city_dem(city_id: str) -> DemGrid:
 
 
 def load_layer(city_id: str, kind: str) -> dict:
-    """Return a GeoJSON FeatureCollection for buildings/roads/facilities."""
-    if kind not in ("buildings", "roads", "facilities"):
+    """Return a GeoJSON FeatureCollection for buildings/roads/facilities/water."""
+    if kind not in ("buildings", "roads", "facilities", "water"):
         raise ValueError(f"unknown layer kind: {kind}")
     with (_city_dir(city_id) / f"{kind}.geojson").open("r", encoding="utf-8") as fh:
         return json.load(fh)
@@ -102,3 +103,53 @@ def road_points(city_id: str) -> list[list[tuple[float, float]]]:
             for part in coords:
                 segments.append(part)
     return segments
+
+
+def line_vertices(geometry: dict | None) -> list[tuple[float, float]]:
+    """Flatten a LineString/MultiLineString/Polygon geometry into (lng, lat) pairs."""
+    if not geometry:
+        return []
+    coords = geometry.get("coordinates") or []
+    gtype = geometry.get("type")
+    if gtype == "LineString":
+        return [(p[0], p[1]) for p in coords]
+    if gtype == "MultiLineString":
+        return [(p[0], p[1]) for part in coords for p in part]
+    if gtype == "Polygon":
+        return [(p[0], p[1]) for ring in coords for p in ring]
+    return []
+
+
+def rivers(city_id: str) -> list[dict]:
+    """Lightweight summaries of the city's rivers (for a selection picker)."""
+    try:
+        fc = load_layer(city_id, "water")
+    except FileNotFoundError:
+        return []  # bundle built without a water layer: nothing to pick
+    rows = []
+    for idx, feature in enumerate(fc.get("features", [])):
+        props = feature.get("properties", {}) or {}
+        geometry = feature.get("geometry")
+        if not geometry or geometry.get("type") not in ("LineString", "MultiLineString", "Polygon"):
+            continue
+        rows.append(
+            {
+                "id": str(props.get("id") or props.get("osm_id") or f"water:{idx}"),
+                "name": props.get("name"),
+                "type": props.get("type") or props.get("waterway") or props.get("natural"),
+            }
+        )
+    return rows
+
+
+def river_geometry_by_ref(city_id: str, ref: str) -> dict | None:
+    """Find a river feature geometry by OSM id or (case-insensitive) name."""
+    fc = load_layer(city_id, "water")
+    wanted = ref.strip()
+    for feature in fc.get("features", []):
+        props = feature.get("properties", {}) or {}
+        ids = {str(props.get("id")), str(props.get("osm_id"))}
+        names = {props.get("name")} if props.get("name") else set()
+        if wanted in ids or (names and wanted.lower() == str(names.pop()).lower()):
+            return feature.get("geometry")
+    return None

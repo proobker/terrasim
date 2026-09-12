@@ -91,6 +91,18 @@ def terrain_tile(city_id: str, z: int, x: int, y: int) -> Response:
     )
 
 
+@app.get("/api/cities/{city_id}/rivers")
+def city_rivers(city_id: str) -> dict:
+    """Lightweight river summaries for hypothesis selection (id/name/type)."""
+    rivers = datasets.rivers(city_id)
+    if not rivers:
+        try:
+            datasets.city_meta(city_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+    return {"rivers": rivers}
+
+
 @app.post("/api/simulate/flood")
 def simulate_flood(scenario: FloodScenario) -> dict:
     try:
@@ -99,13 +111,23 @@ def simulate_flood(scenario: FloodScenario) -> dict:
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
 
-    result = flood.run(
-        grid,
-        scenario.source.lng,
-        scenario.source.lat,
-        scenario.level_m,
-        scenario.mode,
-    )
+    if scenario.river_id is not None:
+        geometry = datasets.river_geometry_by_ref(scenario.city_id, scenario.river_id)
+        if geometry is None:
+            raise HTTPException(status_code=404, detail=f"unknown river: {scenario.river_id}")
+        coords = datasets.line_vertices(geometry)
+        if not coords:
+            raise HTTPException(status_code=400, detail=f"river has no usable geometry: {scenario.river_id}")
+        result = flood.run_river(grid, coords, scenario.level_m, scenario.mode)
+    else:
+        assert scenario.source is not None
+        result = flood.run(
+            grid,
+            scenario.source.lng,
+            scenario.source.lat,
+            scenario.level_m,
+            scenario.mode,
+        )
     response = {
         "kind": "flood",
         "scenario": scenario.model_dump(),
@@ -114,13 +136,17 @@ def simulate_flood(scenario: FloodScenario) -> dict:
         "dry": result["dry"],
     }
     if not result["dry"]:
-        masked, _ = flood.flood_mask(
-            grid,
-            scenario.source.lng,
-            scenario.source.lat,
-            scenario.level_m,
-            scenario.mode,
-        )
+        if scenario.river_id is not None:
+            masked, _ = flood.river_flood_mask(grid, coords, scenario.level_m, scenario.mode)
+        else:
+            assert scenario.source is not None
+            masked, _ = flood.flood_mask(
+                grid,
+                scenario.source.lng,
+                scenario.source.lat,
+                scenario.level_m,
+                scenario.mode,
+            )
         response["exposure"] = exposure.evaluate_flood_exposure(grid, assets, masked)
     return response
 

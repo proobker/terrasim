@@ -8,6 +8,7 @@ bundles under ``data/bundles/<city_id>/``:
 - ``dem.meta.json``     grid georeferencing
 - ``dem.npz``           elevation raster
 - ``buildings.geojson`` / ``roads.geojson`` / ``facilities.geojson``
+- ``water.geojson``     river/stream/canal centerlines (for flood sources)
 
 Usage (from the backend directory):
 
@@ -78,6 +79,7 @@ CITIES = {
 RES_DEG = 0.0003  # ~30-33 m cell at Nepal latitudes
 BUILDING_MAX = 4500  # target total, accumulated across chunked fetches
 ROAD_MAX = 4500
+WATER_MAX = 300
 FACILITY_MAX = 500
 
 
@@ -116,6 +118,7 @@ def merge_elements(target: dict[int, dict], incoming: list[dict]) -> None:
 def fetch_osm(bounds: list[float]) -> dict:
     buildings: dict[int, dict] = {}
     roads: dict[int, dict] = {}
+    water: dict[int, dict] = {}
     for w0, s0, e0, n0 in chunk_bboxes(bounds, splits=2):
         bbox = _bbox_str(w0, s0, e0, n0)
         buildings_query = (
@@ -129,6 +132,11 @@ def fetch_osm(bounds: list[float]) -> dict:
             f"{bbox};);"
             "out geom 3000;"
         )
+        water_query = (
+            "[out:json][timeout:120];"
+            f'(way["waterway"~"^(river|stream|canal)$"]{bbox};);'
+            "out geom 2000;"
+        )
         try:
             merge_elements(buildings, post_overpass_any(buildings_query, min_elements=1).get("elements", []))
         except RuntimeError:
@@ -139,11 +147,17 @@ def fetch_osm(bounds: list[float]) -> dict:
         except RuntimeError:
             print("  !! roads chunk unavailable, skipped")
         time.sleep(1)
+        try:
+            merge_elements(water, post_overpass_any(water_query, min_elements=1).get("elements", []))
+        except RuntimeError:
+            print("  !! water chunk unavailable, skipped")
+        time.sleep(1)
         if len(buildings) >= BUILDING_MAX and len(roads) >= ROAD_MAX:
             break
     return {
         "buildings": {"elements": list(buildings.values())},
         "roads": {"elements": list(roads.values())},
+        "water": {"elements": list(water.values())},
         "facilities_result": fetch_facilities(bounds),
     }
 
@@ -227,11 +241,17 @@ def element_centroid(element: dict) -> tuple[float, float] | None:
     return None
 
 
-def to_features(elements: list[dict], geom_attr: str | None, center_only: bool, keep_lines: bool = False) -> list[dict]:
+def to_features(elements: list[dict], geom_attr: str | None, center_only: bool, keep_lines: bool = False, extra_tags: tuple[str, ...] = (), add_id: bool = False) -> list[dict]:
     features = []
     for el in elements:
         props: dict = {"name": el.get("tags", {}).get("name"),
                        "type": el.get("tags", {}).get("building") or el.get("tags", {}).get("amenity") or el.get("tags", {}).get("highway")}
+        for tag in extra_tags:
+            val = el.get("tags", {}).get(tag)
+            if val:
+                props[tag] = val
+        if add_id:
+            props["id"] = el["id"]
         if center_only:
             pt = element_centroid(el)
             if pt is None:
@@ -418,12 +438,22 @@ def build_city(city_id: str, force: bool = False) -> None:
     buildings = to_features(osm["buildings"].get("elements", []), None, True)
     buildings = buildings[:BUILDING_MAX]
     roads = to_features(osm["roads"].get("elements", []), "geometry", False, keep_lines=True)
+    water = to_features(
+        osm["water"].get("elements", []),
+        "geometry",
+        False,
+        keep_lines=True,
+        extra_tags=("waterway",),
+        add_id=True,
+    )
+    water = water[:WATER_MAX]
     facilities = to_features(osm["facilities_result"], None, True)
     facilities = facilities[:FACILITY_MAX]
 
     for name, fc in (
         ("buildings", buildings),
         ("roads", roads),
+        ("water", water),
         ("facilities", facilities),
     ):
         (out / f"{name}.geojson").write_text(

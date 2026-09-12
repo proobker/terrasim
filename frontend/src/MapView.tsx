@@ -17,6 +17,8 @@ const LAYER_ORDER = [
   "ts-sus-red",
   "ts-sus-yellow",
   "ts-sus-green",
+  "ts-water",
+  "ts-river-sel",
   "ts-overlay",
   "ts-flood-shore",
   "ts-infra-buildings",
@@ -99,6 +101,7 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
   const mode = useStore((s) => s.mode);
   const hazard = useStore((s) => s.hazard);
   const source = useStore((s) => s.source);
+  const selectedRiverId = useStore((s) => s.selectedRiverId);
   const result = useStore((s) => s.result);
   const suitability = useStore((s) => s.suitability);
   const placed = useStore((s) => s.placed);
@@ -111,6 +114,8 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
   const terrain3d = useStore((s) => s.terrain3d);
   // OSM ids -> facility features, for tinting exposed assets after a run.
   const facilitiesRef = useRef<Map<string, GeoFeature>>(new Map());
+  // Water-layer features keyed by OSM id, for drawing the selected river.
+  const waterRef = useRef<Map<string, GeoFeature>>(new Map());
   // Brush used to draw the quake pulse halo; kept in a ref so the rAF loop
   // doesn't re-subscribe on every pixel.
   const pulseRef = useRef<{ radius: number; color: string } | null>(null);
@@ -200,6 +205,8 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
         "ts-sus-green",
         "ts-sus-yellow",
         "ts-sus-red",
+        "ts-water",
+        "ts-river-sel",
         "ts-overlay",
       ]) {
         map.addSource(id, QUIET_SRC as never);
@@ -232,6 +239,28 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
         type: "fill",
         source: "ts-sus-red",
         paint: { "fill-color": "#E34B4B", "fill-opacity": 0.38 },
+        layout: { visibility: "none" },
+      });
+      map.addLayer({
+        id: "ts-water",
+        type: "line",
+        source: "ts-water",
+        paint: {
+          "line-color": "#2E8DA0",
+          "line-width": 2.4,
+          "line-opacity": 0.55,
+        },
+        layout: { visibility: "none" },
+      });
+      map.addLayer({
+        id: "ts-river-sel",
+        type: "line",
+        source: "ts-river-sel",
+        paint: {
+          "line-color": "#6FE3F0",
+          "line-width": 5,
+          "line-opacity": 0.95,
+        },
         layout: { visibility: "none" },
       });
       map.addLayer({
@@ -467,8 +496,40 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
         ) as maplibregl.GeoJSONSource;
         source?.setData(fc(features));
       }),
+      api.layer(city.id, "water").then((data) => {
+        const features = data?.features ?? [];
+        waterRef.current = new Map(
+          features.map((f) => [String(f.properties.id ?? ""), f]),
+        );
+        const source = map.getSource("ts-water") as maplibregl.GeoJSONSource;
+        source?.setData(fc(features));
+        map.setLayoutProperty(
+          "ts-water",
+          "visibility",
+          features.length ? "visible" : "none",
+        );
+      }),
     ]).catch((err: unknown) => setError(String(err)));
   }, [city, setError, mapLoaded]);
+
+  // --- selected river highlight (flood origin by river) ----------------------
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapLoaded) return;
+    const selSource = map.getSource("ts-river-sel") as
+      maplibregl.GeoJSONSource | undefined;
+    if (!selSource) return;
+    const highlight =
+      hazard === "flood" && selectedRiverId && waterRef.current.has(selectedRiverId)
+        ? fc([waterRef.current.get(selectedRiverId)!])
+        : fc([]);
+    selSource.setData(highlight);
+    map.setLayoutProperty(
+      "ts-river-sel",
+      "visibility",
+      highlight.features.length ? "visible" : "none",
+    );
+  }, [selectedRiverId, hazard, mapLoaded]);
 
   // --- infrastructure toggles ------------------------------------------------
   useEffect(() => {
@@ -625,7 +686,9 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
     if (!map || !mapLoaded) return;
     const annoSource = map.getSource("ts-annos") as
       maplibregl.GeoJSONSource | undefined;
-    if (!source || !annoSource) {
+    // A selected river is drawn as its own highlight; a point marker would
+    // only be a fallback origin in that case.
+    if (!source || !annoSource || (hazard === "flood" && selectedRiverId)) {
       annoSource?.setData(fc([]));
       return;
     }
@@ -637,7 +700,7 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
       },
     ];
     annoSource.setData(fc(features));
-  }, [source, hazard, mode, mapLoaded]);
+  }, [source, hazard, selectedRiverId, mode, mapLoaded]);
 
   // --- quake epicenter pulse (rAF halo around the epicenter marker) ----------
   useEffect(() => {

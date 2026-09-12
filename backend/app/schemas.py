@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class GeoPoint(BaseModel):
@@ -22,10 +22,17 @@ class ScenarioAsset(BaseModel):
 
 class FloodScenario(BaseModel):
     city_id: str
-    source: GeoPoint
+    source: GeoPoint | None = None
+    river_id: str | None = None
     level_m: float = Field(default=2.0, gt=-20, lt=5000)
     mode: Literal["rise", "absolute"] = "rise"
     assets: list[ScenarioAsset] | None = None
+
+    @model_validator(mode="after")
+    def exactly_one_origin(self) -> "FloodScenario":
+        if (self.source is None) == (self.river_id is None):
+            raise ValueError("provide exactly one of 'source' or 'river_id'")
+        return self
 
 
 class EarthquakeScenario(BaseModel):

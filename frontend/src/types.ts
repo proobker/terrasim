@@ -12,7 +12,13 @@ export interface CityInfo {
   attribution: string[];
 }
 
-export type LayerKind = "buildings" | "roads" | "facilities";
+export type LayerKind = "buildings" | "roads" | "facilities" | "water";
+
+export interface RiverSummary {
+  id: string;
+  name?: string | null;
+  type?: string | null;
+}
 
 export interface GeoFeature {
   type: "Feature";
@@ -38,7 +44,8 @@ export interface ScenarioAsset {
 
 export interface FloodScenario {
   city_id: string;
-  source: PointLngLat;
+  source?: PointLngLat | null;
+  river_id?: string | null;
   level_m: number;
   mode: "rise" | "absolute";
   assets?: ScenarioAsset[] | null;

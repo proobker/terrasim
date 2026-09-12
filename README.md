@@ -20,7 +20,7 @@ The core loop is **PLAN → SIMULATE → IMPROVE**.
 - **Frontend**: Vite + React + TypeScript + MapLibre GL, styled with a pixel-art RPG UI (Pokemon FireRed-inspired chrome).
 - **Backend**: Python + FastAPI (hosted locally, `http://127.0.0.1:8000`).
 - **Simulation**: DEM-based flood fill, earthquake attenuation model, suitability/risk zones (NumPy + Shapely).
-- **Data**: OpenStreetMap (buildings, roads, facilities) + Copernicus/SRTM elevation, preloaded offline in `data/bundles/`.
+- **Data**: OpenStreetMap (buildings, roads, facilities, rivers) + Copernicus/SRTM elevation, preloaded offline in `data/bundles/`.
 
 ```
 terrasim/
@@ -70,11 +70,16 @@ python scripts/fetch_data.py --all
 | ------ | --------------------------------- | ----------------------------------------- |
 | GET    | `/api/health`                     | Health check                              |
 | GET    | `/api/cities`                     | List available demo areas                 |
-| GET    | `/api/cities/{id}/layers/{kind}`  | Buildings / roads / facilities GeoJSON    |
+| GET    | `/api/cities/{id}/layers/{kind}`  | Buildings / roads / facilities / water GeoJSON |
+| GET    | `/api/cities/{id}/rivers`         | River summaries for flood hypothesis selection |
 | GET    | `/api/cities/{id}/dem`            | Elevation raster metadata + tiles         |
 | POST   | `/api/simulate/flood`             | Flood scenario → extent + exposure        |
 | POST   | `/api/simulate/earthquake`        | Earthquake scenario → zones + exposure    |
 | POST   | `/api/suitability`                | New-City suitability (green/yellow/red)   |
+
+A flood scenario floods either from a clicked source point (`source: {lng, lat}`) or
+from a selected river (`river_id`, from `/api/cities/{id}/rivers`), with
+`level_m` as the hypothesized rise in meters above the river's channel level.
 
 Run the test suite:
 

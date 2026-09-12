@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 import ExposurePanel from "./ExposurePanel";
 import { drawPreviewInto } from "./pixelIcons";
 import { useStore } from "./store";
-import { useSimulate, useSuitability } from "./useSimulate";
+import { useRivers, useSimulate, useSuitability } from "./useSimulate";
 
 const ASSET_TYPES = [
   { type: "hospital" as const, name: "Hospital" },
@@ -51,6 +51,33 @@ function LayerToggles() {
   );
 }
 
+function FloodOriginPicker() {
+  const rivers = useStore((s) => s.rivers);
+  const selectedRiverId = useStore((s) => s.selectedRiverId);
+  const setSelectedRiverId = useStore((s) => s.setSelectedRiverId);
+  return (
+    <div className="field-row" style={{ margin: 0, flexDirection: "column", alignItems: "stretch", gap: 6 }}>
+      <span className="pixel-label">Flood origin</span>
+      <select
+        className="pixel-select"
+        value={selectedRiverId ?? ""}
+        onChange={(e) => setSelectedRiverId(e.target.value || null)}
+      >
+        <option value="">Tap the map to set a point</option>
+        {rivers.map((r) => (
+          <option key={r.id} value={r.id}>
+            {r.name || `${r.type ?? "river"} · ${r.id}`}
+          </option>
+        ))}
+      </select>
+      <div className="mini-note">
+        Pick a river to flood along the whole channel, or tap the map for a point origin. A river is an estimated,
+        evenly rising water level — not a forecast.
+      </div>
+    </div>
+  );
+}
+
 function HazardControls() {
   const hazard = useStore((s) => s.hazard);
   const setHazard = useStore((s) => s.setHazard);
@@ -74,21 +101,25 @@ function HazardControls() {
         </button>
       </div>
 
-      {hazard === "flood" ? (
-        <div className="field-row">
-          <span className="pixel-label">River rise</span>
-          <input
-            className="pixel-range"
-            type="range"
-            min={0.5}
-            max={8}
-            step={0.5}
-            value={floodLevelM}
-            onChange={(e) => setFloodLevelM(Number(e.target.value))}
-          />
-          <span className="range-label">{floodLevelM.toFixed(1)} m</span>
-        </div>
-      ) : (
+      {hazard === "flood" && (
+        <>
+          <FloodOriginPicker />
+          <div className="field-row">
+            <span className="pixel-label">River rise</span>
+            <input
+              className="pixel-range"
+              type="range"
+              min={0.5}
+              max={8}
+              step={0.5}
+              value={floodLevelM}
+              onChange={(e) => setFloodLevelM(Number(e.target.value))}
+            />
+            <span className="range-label">{floodLevelM.toFixed(1)} m</span>
+          </div>
+        </>
+      )}
+      {hazard !== "flood" && (
         <>
           <div className="field-row">
             <span className="pixel-label">Magnitude</span>
@@ -160,6 +191,7 @@ function PlaceControls() {
   const hazard = useStore((s) => s.hazard);
   const pickingOrigin = useStore((s) => s.pickingOrigin);
   const setPickingOrigin = useStore((s) => s.setPickingOrigin);
+  const selectedRiverId = useStore((s) => s.selectedRiverId);
   const { runHazard, running } = useSimulate();
 
   return (
@@ -221,6 +253,8 @@ function PlaceControls() {
         </button>
       </div>
 
+      {hazard === "flood" && <FloodOriginPicker />}
+
       <button
         className="pixel-btn"
         data-active={pickingOrigin}
@@ -229,14 +263,22 @@ function PlaceControls() {
       >
         {source
           ? hazard === "flood"
-            ? "↻ Flood origin set"
+            ? "↻ Flood point set"
             : "↻ Epicenter set"
           : hazard === "flood"
-            ? "Set flood origin…"
+            ? selectedRiverId
+              ? "↻ River selected"
+              : "Set flood origin…"
             : "Set epicenter…"}
       </button>
       <div className="mini-note">
-        {pickingOrigin ? "Tap the map to place the hazard origin." : "Then pick a point on the map for the hazard."}
+        {pickingOrigin
+          ? "Tap the map to place the hazard origin."
+          : hazard === "flood" && selectedRiverId
+            ? "The selected river will flood — tap the map to also set a point fallback."
+            : hazard === "flood"
+              ? "Pick a river above, or tap the map to set a point flood origin."
+              : "Then pick a point on the map for the epicenter."}
       </div>
 
       <button className="pixel-btn primary" onClick={runHazard} disabled={running}>
@@ -253,12 +295,17 @@ export default function SidePanel() {
   const showSuitability = useStore((s) => s.showSuitability);
   const setShowSuitability = useStore((s) => s.setShowSuitability);
   const { load } = useSuitability();
+  const { load: loadRivers } = useRivers();
   const pickingOrigin = useStore((s) => s.pickingOrigin);
   const hazard = useStore((s) => s.hazard);
 
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    void loadRivers();
+  }, [loadRivers]);
 
   return (
     <div className="side-panel">

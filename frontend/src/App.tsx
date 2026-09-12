@@ -41,20 +41,23 @@ function MapHint() {
   const pickingOrigin = useStore((s) => s.pickingOrigin);
   const source = useStore((s) => s.source);
   const selectedAssetId = useStore((s) => s.selectedAssetId);
+  const selectedRiverId = useStore((s) => s.selectedRiverId);
   const result = useStore((s) => s.result);
 
   const text = useMemo(() => {
     if (pickingOrigin) return "Tap the map to place the hazard origin";
     if (pendingAsset) return "Tap the map to place the facility";
     if (mode === "new") {
+      if (hazard === "flood" && selectedRiverId) return "River selected · set the rise and run the scenario";
       if (selectedAssetId) return "Tap the map to move the selected facility";
       if (!source) return "Select a facility tile, then tap the map to place it";
       return "Tap a facility to reposition · Run a scenario to test";
     }
+    if (hazard === "flood" && selectedRiverId) return "River selected · set the rise and run the scenario";
     if (!source) return hazard === "flood" ? "Tap the map to set the flood origin" : "Tap the map to set the epicenter";
     if (!result) return "Set parameters, then run the scenario";
     return "Scenario complete · toggle layers or run again";
-  }, [mode, hazard, pendingAsset, pickingOrigin, source, selectedAssetId, result]);
+  }, [mode, hazard, pendingAsset, pickingOrigin, source, selectedAssetId, selectedRiverId, result]);
 
   return <div className="map-hint">{text}</div>;
 }

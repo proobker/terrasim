@@ -80,7 +80,32 @@ def make_city_bundle(tmp_path: Path, city_id: str = "testcity", n: int = 24) -> 
             }
         ],
     }
-    for name, fc in (("buildings", buildings), ("roads", roads), ("facilities", facilities)):
+    water = {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "properties": {"name": "Test River", "id": "w-1", "type": "waterway", "waterway": "river"},
+                "geometry": {
+                    "type": "LineString",
+                    "coordinates": [
+                        [min_lng + res, min_lat + res],
+                        [min_lng + 2 * res, min_lat + 2 * res],
+                        [c_lng - res, c_lat - res],
+                        [c_lng, c_lat],
+                        [c_lng + res, c_lat + res],
+                        [min_lng + (n - 1) * res, min_lat + (n - 1) * res],
+                    ],
+                },
+            }
+        ],
+    }
+    for name, fc in (
+        ("buildings", buildings),
+        ("roads", roads),
+        ("facilities", facilities),
+        ("water", water),
+    ):
         (city / f"{name}.geojson").write_text(json.dumps(fc), encoding="utf-8")
     return city
 
@@ -127,6 +152,43 @@ def test_flood_dry_when_surface_below_source(city):
     mask, surface = flood.flood_mask(grid, lng, lat, level_m=60.0, mode="absolute")
     assert surface is None
     assert mask.sum() == 0
+
+
+def test_river_flood_seeds_channel_and_rises(city):
+    grid = datasets.load_city_dem(city.name)
+    geometry = datasets.river_geometry_by_ref(city.name, "w-1")
+    assert geometry is not None
+    coords = datasets.line_vertices(geometry)
+    centre_r, centre_c = grid.cell(*datasets.city_meta(city.name)["center"])
+
+    mask, surface = flood.river_flood_mask(grid, coords, level_m=2.0, mode="rise")
+    expected_surface = float(grid.elev[centre_r, centre_c]) + 2.0
+    assert surface == expected_surface
+    assert mask.sum() > 0
+    assert mask[centre_r, centre_c]
+
+    big_mask, _ = flood.river_flood_mask(grid, coords, level_m=50.0, mode="rise")
+    assert big_mask.sum() > mask.sum()
+
+
+def test_river_flood_dry_when_surface_below_channel(city):
+    grid = datasets.load_city_dem(city.name)
+    coords = datasets.line_vertices(datasets.river_geometry_by_ref(city.name, "w-1"))
+    mask, surface = flood.river_flood_mask(grid, coords, level_m=5.0, mode="absolute")
+    assert surface == 5.0
+    assert mask.sum() == 0
+
+    result = flood.run_river(grid, coords, level_m=5.0, mode="absolute")
+    assert result["dry"] is True
+    assert result["stats"]["cells_flooded"] == 0
+
+
+def test_river_lookup_by_name_and_rivers_summary(city):
+    assert datasets.river_geometry_by_ref(city.name, "TEST RIVER") is not None
+    rows = datasets.rivers(city.name)
+    assert rows[0]["id"] == "w-1"
+    assert rows[0]["name"] == "Test River"
+    assert rows[0]["type"] == "waterway"
 
 
 def test_quake_intensity_decays_with_distance(city):
