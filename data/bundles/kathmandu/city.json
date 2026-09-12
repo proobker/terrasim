@@ -1,0 +1,26 @@
+{
+  "id": "kathmandu",
+  "name": "Kathmandu",
+  "mode": "existing",
+  "status": "urban core + surrounding valley hills",
+  "center": [
+    85.34,
+    27.700000000000003
+  ],
+  "bounds": [
+    85.24,
+    27.62,
+    85.44,
+    27.78
+  ],
+  "zoom": 13,
+  "grid": {
+    "ncols": 668,
+    "nrows": 534,
+    "res_deg": 0.0003
+  },
+  "attribution": [
+    "Map data \u00a9 OpenStreetMap contributors (ODbL)",
+    "Elevation: Mapzen terrain tiles (Terrarium)"
+  ]
+}

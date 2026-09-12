@@ -1,0 +1,32 @@
+[project]
+name = "terrasim-backend"
+version = "0.1.0"
+description = "terrasim — Building Resilient Areas for Climate & Emergencies (simulation API)"
+readme = "README.md"
+authors = [
+    { name = "terrasim", email = "hello@terrasim.local" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "fastapi>=0.141.1",
+    "httpx>=0.28.1",
+    "numpy>=2.5.3",
+    "pytest>=9.1.1",
+    "shapely>=2.1.2",
+    "uvicorn[standard]>=0.52.4",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[dependency-groups]
+dev = ["pillow>=11"]

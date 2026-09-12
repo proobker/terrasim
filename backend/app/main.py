@@ -1,0 +1,137 @@
+"""terrasim backend API.
+
+FastAPI server hosting the simulation + data layer. Run locally:
+
+    uv run uvicorn app.main:app --reload --port 8000
+"""
+
+from __future__ import annotations
+
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+
+from app import __version__, datasets
+from app.engine import earthquake, exposure, flood, suitability
+from app.schemas import EarthquakeScenario, FloodScenario, SuitabilityRequest
+
+app = FastAPI(
+    title="terrasim",
+    version=__version__,
+    description="Building Resilient Areas for Climate & Emergencies — scenario-based geospatial decision-support API.",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.get("/api/health")
+def health() -> dict:
+    return {"status": "ok", "version": __version__, "cities": len(datasets.list_cities())}
+
+
+@app.get("/api/cities")
+def cities() -> dict:
+    return {"cities": datasets.list_cities()}
+
+
+@app.get("/api/cities/{city_id}")
+def city(city_id: str) -> dict:
+    try:
+        return datasets.city_meta(city_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@app.get("/api/cities/{city_id}/layers/{kind}")
+def city_layer(city_id: str, kind: str) -> dict:
+    try:
+        return datasets.load_layer(city_id, kind)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/simulate/flood")
+def simulate_flood(scenario: FloodScenario) -> dict:
+    try:
+        grid = datasets.load_city_dem(scenario.city_id)
+        assets = datasets.load_assets(scenario.city_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+    result = flood.run(
+        grid,
+        scenario.source.lng,
+        scenario.source.lat,
+        scenario.level_m,
+        scenario.mode,
+    )
+    response = {
+        "kind": "flood",
+        "scenario": scenario.model_dump(),
+        "stats": result["stats"],
+        "overlay": result["flooded"],
+    }
+    if not result["dry"]:
+        masked, _ = flood.flood_mask(
+            grid,
+            scenario.source.lng,
+            scenario.source.lat,
+            scenario.level_m,
+            scenario.mode,
+        )
+        response["exposure"] = exposure.evaluate_flood_exposure(grid, assets, masked)
+    return response
+
+
+@app.post("/api/simulate/earthquake")
+def simulate_earthquake(scenario: EarthquakeScenario) -> dict:
+    try:
+        grid = datasets.load_city_dem(scenario.city_id)
+        assets = datasets.load_assets(scenario.city_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+    result = earthquake.run(
+        grid,
+        scenario.epicenter.lng,
+        scenario.epicenter.lat,
+        scenario.magnitude,
+        scenario.depth_km,
+    )
+    hazard = {
+        "kind": "earthquake",
+        "epicenter_lng": scenario.epicenter.lng,
+        "epicenter_lat": scenario.epicenter.lat,
+        "magnitude": scenario.magnitude,
+        "depth_km": scenario.depth_km,
+    }
+    return {
+        "kind": "earthquake",
+        "scenario": scenario.model_dump(),
+        "zones": result["zones"],
+        "bands": result["bands"],
+        "area_km2": result["area_km2"],
+        "exposure": exposure.evaluate(grid, assets, hazard),
+    }
+
+
+@app.post("/api/cities/{city_id}/suitability")
+def city_suitability(city_id: str, _body: SuitabilityRequest | None = None) -> dict:
+    try:
+        grid = datasets.load_city_dem(city_id)
+        segments = datasets.road_points(city_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    road_points = [pt for seg in segments for pt in seg]
+    if not road_points:
+        road_points = None
+    return suitability.run(grid, road_points)

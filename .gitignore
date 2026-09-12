@@ -1,0 +1,29 @@
+# Dependencies / build output
+node_modules/
+dist/
+build/
+.vite/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.coverage
+.uv/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Raw downloaded data (regenerate with scripts/fetch_data.py)
+data/fetch/
+*.npy.tmp
