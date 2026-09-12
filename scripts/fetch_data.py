@@ -76,6 +76,11 @@ CITIES = {
         "status": "urban core + surrounding valley hills",
         # Dense OSM feature fetch stays on the urban core box.
         "bounds": [85.24, 27.62, 85.44, 27.78],
+        # Buildings cover the whole valley theatre (Kathmandu + Lalitpur +
+        # Bhaktapur floor and the rim settlements), not just the urban core.
+        "building_bounds": [85.15, 27.54, 85.47, 27.75],
+        # Keep every building the mirrors return — no largest-first cap.
+        "building_max": None,
         # The valley theatre: the geomorphologic bowl used for the DEM grid,
         # terrain tiles, hazard simulation and the default map view.
         "hazard_bounds": [85.15, 27.54, 85.47, 27.75],
@@ -95,7 +100,9 @@ CITIES = {
 }
 
 RES_DEG = 0.0003  # ~30-33 m cell at Nepal latitudes
-BUILDING_MAX = 4500  # target total, accumulated across chunked fetches
+BUILDING_MAX = 4500  # default cap (per-city) for a feature fetch
+BUILDING_SPLITS = 6  # chunk grid for the building pass (6x6 keeps dense-chunk
+                     # extracts under the `out geom 3000` response ceiling)
 ROAD_MAX = 4500
 WATER_MAX = 300
 FACILITY_MAX = 500
@@ -133,13 +140,19 @@ def merge_elements(target: dict[int, dict], incoming: list[dict]) -> None:
             target[el["id"]] = el
 
 
-def fetch_osm(bounds: list[float]) -> dict:
+def fetch_osm(
+    bounds: list[float],
+    building_bounds: list[float] | None = None,
+    building_max: int | None = BUILDING_MAX,
+) -> dict:
     buildings: dict[int, dict] = {}
     roads: dict[int, dict] = {}
     water: dict[int, dict] = {}
     # Buildings need full footprints (`out geom`), not centroids: keep chunks
-    # small (3x3) so mirrors reliably return full rings, not degenerate ways.
-    for w0, s0, e0, n0 in chunk_bboxes(bounds, splits=3):
+    # small (6x6 on the building area) so mirrors reliably return full rings,
+    # not degenerate ways, and a chunk's extract stays under `out geom 3000`.
+    fetch_bounds = building_bounds or bounds
+    for w0, s0, e0, n0 in chunk_bboxes(fetch_bounds, splits=BUILDING_SPLITS):
         bbox = _bbox_str(w0, s0, e0, n0)
         buildings_query = (
             "[out:json][timeout:120];"
@@ -151,7 +164,7 @@ def fetch_osm(bounds: list[float]) -> dict:
         except RuntimeError:
             print("  !! buildings chunk unavailable, skipped")
         time.sleep(1)
-        if len(buildings) >= BUILDING_MAX:
+        if building_max is not None and len(buildings) >= building_max:
             break
     for w0, s0, e0, n0 in chunk_bboxes(bounds, splits=2):
         bbox = _bbox_str(w0, s0, e0, n0)
@@ -181,7 +194,7 @@ def fetch_osm(bounds: list[float]) -> dict:
         except RuntimeError:
             print("  !! water chunk unavailable, skipped")
         time.sleep(1)
-        if len(buildings) >= BUILDING_MAX and len(roads) >= ROAD_MAX:
+        if len(roads) >= ROAD_MAX:
             break
     return {
         "buildings": {"elements": list(buildings.values())},
@@ -912,7 +925,11 @@ def build_city(city_id: str, force: bool = False) -> None:
     out.mkdir(parents=True, exist_ok=True)
 
     print(f"[{city_id}] fetching OSM (overpass, mirror rotation)...")
-    osm = fetch_osm(cfg["bounds"])
+    osm = fetch_osm(
+        cfg["bounds"],
+        building_bounds=cfg.get("building_bounds"),
+        building_max=cfg.get("building_max", BUILDING_MAX),
+    )
 
     buildings = to_features(
         osm["buildings"].get("elements", []),
@@ -922,8 +939,11 @@ def build_city(city_id: str, force: bool = False) -> None:
         add_id=True,
     )
     # Real footprints: drop sliver rings and any degenerate 2-point ways the
-    # mirrors returned, then keep the largest (most visible) BUILDING_MAX.
-    buildings = filter_buildings(buildings)[:BUILDING_MAX]
+    # mirrors returned, then keep the largest (most visible) when capped.
+    # Uncapped cities (aka all-valley fetches) keep every building.
+    buildings = filter_buildings(buildings)
+    if cfg.get("building_max", BUILDING_MAX) is not None:
+        buildings = buildings[: cfg["building_max"]]
     roads = to_features(osm["roads"].get("elements", []), "geometry", False, keep_lines=True)
     water = to_features(
         osm["water"].get("elements", []),

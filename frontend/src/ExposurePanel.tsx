@@ -38,7 +38,8 @@ export default function ExposurePanel() {
   if (result.kind === "flood") {
     const { stats, dry, exposure } = result;
     return (
-      <div className="panel-body" style={{ gap: 8 }}>
+      <section className="pixel-panel">
+        <div className="panel-body" style={{ gap: 8 }}>
         <div className="chrome-title">Estimated Flood Extent</div>
         {dry ? (
           <div className="mini-note">
@@ -87,7 +88,8 @@ export default function ExposurePanel() {
             )}
           </>
         )}
-      </div>
+        </div>
+      </section>
     );
   }
 
@@ -103,7 +105,8 @@ export default function ExposurePanel() {
       </div>
     ) : null;
   return (
-    <div className="panel-body" style={{ gap: 8 }}>
+    <section className="pixel-panel">
+      <div className="panel-body" style={{ gap: 8 }}>
       <div className="chrome-title">Estimated Shaking Intensity</div>
       <div className="stat-grid">
         <div className="stat-box">
@@ -125,7 +128,8 @@ export default function ExposurePanel() {
       </div>
       {radiiNote}
       {mode === "new" && placed.length > 0 && <PlannedVerdicts result={result} />}
-    </div>
+      </div>
+    </section>
   );
 }
 

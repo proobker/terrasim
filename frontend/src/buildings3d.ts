@@ -10,6 +10,11 @@ const CLAY = "#8A6A4B";
 const HIGHLIGHT = "#E6C66A";
 export const SELECTED_COLOR = "#EFE6C9";
 
+// Random-but-stable silhouette tints for real OSM buildings. The colour is
+// picked deterministically from each building's id so nothing flickers between
+// renders or restarts, while the skyline still reads as a varied toy-city.
+const RANDOM_TINTS = ["#60A5FA", "#A78BFA", "#FBBF24", "#FB923C", "#94A3B8"] as const;
+
 export interface BlockProperties {
   height: number;
   color: string;
@@ -187,7 +192,7 @@ export function buildBlockFeatures(raw: GeoFeature[]): BlockFeature[] {
         ...props,
         id,
         height: estimateHeight(props),
-        color: typeDef(String(props.type ?? "")).color,
+        color: RANDOM_TINTS[hash(seed) % RANDOM_TINTS.length],
       },
       geometry: {
         type: "Polygon",

@@ -42,7 +42,7 @@ function LayerToggles() {
       <div className="pixel-label" style={{ marginBottom: 6 }}>
         Infrastructure overlay
       </div>
-      <div className="field-row" style={{ margin: 0 }}>
+      <div className="field-row" style={{ margin: 0, flexWrap: "wrap", rowGap: 8 }}>
         {toggles.map(([label, on, setOn]) => (
           <label key={label} style={{ display: "flex", gap: 6, alignItems: "center", cursor: "pointer" }}>
             <input
