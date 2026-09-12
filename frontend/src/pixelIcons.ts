@@ -26,7 +26,13 @@ const rect = (
   g.fillRect(x * PX, y * PX, w * PX, h * PX);
 };
 
-function house(g: CanvasRenderingContext2D, x: number, y: number, body: string, roof: string) {
+function house(
+  g: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  body: string,
+  roof: string,
+) {
   rect(g, x, y, 4, 4, body);
   rect(g, x + 1, y - 2, 2, 2, roof);
   rect(g, x + 1, y + 2, 2, 2, "#1c2b24");
@@ -154,23 +160,32 @@ const ICON_ATLAS: Record<string, string> = {
 };
 
 export function atlasDefinitions(): Record<string, Sprite> {
-  const entries: [string, Sprite][] = Object.entries(ICONS).map(([key, draw]) => [
-    ICON_ATLAS[key] ?? `ts-${key}`,
-    draw(),
-  ]);
+  const entries: [string, Sprite][] = Object.entries(ICONS).map(
+    ([key, draw]) => [ICON_ATLAS[key] ?? `ts-${key}`, draw()],
+  );
   return Object.fromEntries(entries);
 }
 
 export function iconForType(type: string | undefined): string {
   const key = (type ?? "").toLowerCase();
   if (key in ICON_ATLAS) return ICON_ATLAS[key];
-  if (key.includes("school") || key.includes("college") || key.includes("university")) return "ts-school";
+  if (
+    key.includes("school") ||
+    key.includes("college") ||
+    key.includes("university")
+  )
+    return "ts-school";
   if (key.includes("clinic") || key.includes("doctor")) return "ts-clinic";
   if (key.includes("hospital")) return "ts-hospital";
+  if (
+    key.includes("health") ||
+    key.includes("pharmacy") ||
+    key.includes("care")
+  )
+    return "ts-clinic";
   if (key.includes("fire")) return "ts-fire";
   if (key.includes("police")) return "ts-police";
   if (key.includes("shelter") || key.includes("community")) return "ts-shelter";
-  if (key !== "yes" && key) return `ts-${key}`;
   return "ts-building";
 }
 
@@ -178,7 +193,12 @@ function drawKeyFor(type: string): string {
   const key = type.toLowerCase();
   if (key in ICONS) return key;
   if (key === "higher_ed") return "school";
-  if (key.includes("school") || key.includes("college") || key.includes("university")) return "school";
+  if (
+    key.includes("school") ||
+    key.includes("college") ||
+    key.includes("university")
+  )
+    return "school";
   if (key.includes("clinic") || key.includes("doctor")) return "clinic";
   if (key.includes("hospital")) return "hospital";
   if (key.includes("fire")) return "fire_station";
@@ -188,13 +208,25 @@ function drawKeyFor(type: string): string {
 }
 
 /** Render a friendly icon name to a scaled pixel canvas for UI previews. */
-export function previewCanvas(type: string, size = 36, padding = 2): HTMLCanvasElement {
+export function previewCanvas(
+  type: string,
+  size = 36,
+  padding = 2,
+): HTMLCanvasElement {
   const sprite = ICONS[drawKeyFor(type)]();
   const tmp = document.createElement("canvas");
   tmp.width = sprite.width;
   tmp.height = sprite.height;
   const tg = tmp.getContext("2d")!;
-  tg.putImageData(new ImageData(new Uint8ClampedArray(sprite.data), sprite.width, sprite.height), 0, 0);
+  tg.putImageData(
+    new ImageData(
+      new Uint8ClampedArray(sprite.data),
+      sprite.width,
+      sprite.height,
+    ),
+    0,
+    0,
+  );
 
   const canvas = document.createElement("canvas");
   canvas.width = size;
@@ -204,21 +236,36 @@ export function previewCanvas(type: string, size = 36, padding = 2): HTMLCanvasE
 }
 
 /** Draw the sprite for an icon type into an existing canvas element. */
-export function drawPreviewInto(type: string, canvas: HTMLCanvasElement, padding = 2): void {
+export function drawPreviewInto(
+  type: string,
+  canvas: HTMLCanvasElement,
+  padding = 2,
+): void {
   const sprite = ICONS[drawKeyFor(type)]();
   const tmp = document.createElement("canvas");
   tmp.width = sprite.width;
   tmp.height = sprite.height;
-  tmp.getContext("2d")!.putImageData(
-    new ImageData(new Uint8ClampedArray(sprite.data), sprite.width, sprite.height),
-    0,
-    0,
-  );
+  tmp
+    .getContext("2d")!
+    .putImageData(
+      new ImageData(
+        new Uint8ClampedArray(sprite.data),
+        sprite.width,
+        sprite.height,
+      ),
+      0,
+      0,
+    );
   const edge = Math.min(canvas.width, canvas.height);
   drawSpriteScaled(canvas, tmp, padding, edge - padding * 2);
 }
 
-function drawSpriteScaled(target: HTMLCanvasElement, src: HTMLCanvasElement, x: number, size: number): void {
+function drawSpriteScaled(
+  target: HTMLCanvasElement,
+  src: HTMLCanvasElement,
+  x: number,
+  size: number,
+): void {
   const g = target.getContext("2d")!;
   g.clearRect(0, 0, target.width, target.height);
   g.imageSmoothingEnabled = false;

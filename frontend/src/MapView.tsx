@@ -1,6 +1,6 @@
 import * as maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "./api";
 import { atlasDefinitions, iconForType } from "./pixelIcons";
 import { useStore } from "./store";
@@ -19,7 +19,10 @@ const LAYER_ORDER = [
   "ts-annos",
 ];
 
-const QUIET_SRC = { type: "geojson", data: { type: "FeatureCollection", features: [] } } as const;
+const QUIET_SRC = {
+  type: "geojson",
+  data: { type: "FeatureCollection", features: [] },
+} as const;
 
 function fc(features: GeoFeature[]): FeatureCollection {
   return { type: "FeatureCollection", features };
@@ -29,6 +32,8 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const initializedCity = useRef<string | null>(null);
+  // maplibre v6 only allows style mutations after the style has loaded.
+  const [mapLoaded, setMapLoaded] = useState(false);
 
   const city = useStore((s) => s.city);
   const mode = useStore((s) => s.mode);
@@ -82,106 +87,138 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
       attributionControl: false,
     });
 
-    map.addControl(new maplibregl.AttributionControl({ compact: true }), "bottom-right");
+    map.addControl(
+      new maplibregl.AttributionControl({ compact: true }),
+      "bottom-right",
+    );
 
-    const atlas = atlasDefinitions();
-    for (const [name, image] of Object.entries(atlas)) {
-      const imageData = new ImageData(new Uint8ClampedArray(image.data), image.width, image.height);
-      map.addImage(name, imageData);
-    }
+    // Style mutations (images/sources/layers) must wait for the style to load —
+    // maplibre throws "Style is not done loading" otherwise.
+    map.once("load", () => {
+      if (mapRef.current !== map) return;
+      const atlas = atlasDefinitions();
+      for (const [name, image] of Object.entries(atlas)) {
+        const imageData = new ImageData(
+          new Uint8ClampedArray(image.data),
+          image.width,
+          image.height,
+        );
+        map.addImage(name, imageData);
+      }
 
-    // static (empty) sources
-    for (const id of ["ts-sus-green", "ts-sus-yellow", "ts-sus-red", "ts-overlay"]) {
-      map.addSource(id, QUIET_SRC as never);
-    }
-    map.addSource("ts-infra-buildings", QUIET_SRC as never);
-    map.addSource("ts-infra-roads", QUIET_SRC as never);
-    map.addSource("ts-infra-facilities", QUIET_SRC as never);
-    map.addSource("ts-plan-assets", QUIET_SRC as never);
-    map.addSource("ts-annos", QUIET_SRC as never);
+      // static (empty) sources
+      for (const id of [
+        "ts-sus-green",
+        "ts-sus-yellow",
+        "ts-sus-red",
+        "ts-overlay",
+      ]) {
+        map.addSource(id, QUIET_SRC as never);
+      }
+      map.addSource("ts-infra-buildings", QUIET_SRC as never);
+      map.addSource("ts-infra-roads", QUIET_SRC as never);
+      map.addSource("ts-infra-facilities", QUIET_SRC as never);
+      map.addSource("ts-plan-assets", QUIET_SRC as never);
+      map.addSource("ts-annos", QUIET_SRC as never);
 
-    map.addLayer({
-      id: "ts-sus-green",
-      type: "fill",
-      source: "ts-sus-green",
-      paint: { "fill-color": "#55B86A", "fill-opacity": 0.18 },
-      layout: { visibility: "none" },
-    });
-    map.addLayer({
-      id: "ts-sus-yellow",
-      type: "fill",
-      source: "ts-sus-yellow",
-      paint: { "fill-color": "#E59B45", "fill-opacity": 0.32 },
-      layout: { visibility: "none" },
-    });
-    map.addLayer({
-      id: "ts-sus-red",
-      type: "fill",
-      source: "ts-sus-red",
-      paint: { "fill-color": "#E34B4B", "fill-opacity": 0.38 },
-      layout: { visibility: "none" },
-    });
-    map.addLayer({
-      id: "ts-overlay",
-      type: "fill",
-      source: "ts-overlay",
-      paint: {
-        "fill-color": [
-          "match",
-          ["get", "class"],
-          "high", "#E34B4B",
-          "medium_high", "#E59B45",
-          "medium", "#E6C66A",
-          "low", "#159A9C",
-          "flood", "#43C7D8",
-          "#43C7D8",
-        ],
-        "fill-opacity": [
-          "match",
-          ["get", "class"],
-          "flood", 0.55,
-          0.34,
-        ],
-      },
-      layout: { visibility: "none" },
-    });
-    map.addLayer({
-      id: "ts-infra-buildings",
-      type: "circle",
-      source: "ts-infra-buildings",
-      paint: { "circle-radius": 1.6, "circle-color": "#314137", "circle-opacity": 0.8 },
-    });
-    map.addLayer({
-      id: "ts-infra-roads",
-      type: "line",
-      source: "ts-infra-roads",
-      paint: { "line-color": "#d9b957", "line-width": 1.3, "line-opacity": 0.85 },
-    });
-    map.addLayer({
-      id: "ts-infra-facilities",
-      type: "symbol",
-      source: "ts-infra-facilities",
-      layout: {
-        "icon-image": ["get", "icon"],
-        "icon-size": 0.55,
-        "icon-allow-overlap": true,
-      },
-    });
-    map.addLayer({
-      id: "ts-plan-assets",
-      type: "symbol",
-      source: "ts-plan-assets",
-      layout: {
-        "icon-image": ["get", "icon"],
-        "icon-size": ["case", ["get", "selected"], 1.5, 0.9],
-        "icon-allow-overlap": true,
-      },
-    });
-    map.addLayer({
-      id: "ts-annos",
-      type: "symbol",
-      source: "ts-annos",
-      layout: { "icon-image": ["get", "icon"], "icon-size": 0.9, "icon-allow-overlap": true },
+      map.addLayer({
+        id: "ts-sus-green",
+        type: "fill",
+        source: "ts-sus-green",
+        paint: { "fill-color": "#55B86A", "fill-opacity": 0.18 },
+        layout: { visibility: "none" },
+      });
+      map.addLayer({
+        id: "ts-sus-yellow",
+        type: "fill",
+        source: "ts-sus-yellow",
+        paint: { "fill-color": "#E59B45", "fill-opacity": 0.32 },
+        layout: { visibility: "none" },
+      });
+      map.addLayer({
+        id: "ts-sus-red",
+        type: "fill",
+        source: "ts-sus-red",
+        paint: { "fill-color": "#E34B4B", "fill-opacity": 0.38 },
+        layout: { visibility: "none" },
+      });
+      map.addLayer({
+        id: "ts-overlay",
+        type: "fill",
+        source: "ts-overlay",
+        paint: {
+          "fill-color": [
+            "match",
+            ["get", "class"],
+            "high",
+            "#E34B4B",
+            "medium_high",
+            "#E59B45",
+            "medium",
+            "#E6C66A",
+            "low",
+            "#159A9C",
+            "flood",
+            "#43C7D8",
+            "#43C7D8",
+          ],
+          "fill-opacity": ["match", ["get", "class"], "flood", 0.55, 0.34],
+        },
+        layout: { visibility: "none" },
+      });
+      map.addLayer({
+        id: "ts-infra-buildings",
+        type: "circle",
+        source: "ts-infra-buildings",
+        paint: {
+          "circle-radius": 1.6,
+          "circle-color": "#314137",
+          "circle-opacity": 0.8,
+        },
+      });
+      map.addLayer({
+        id: "ts-infra-roads",
+        type: "line",
+        source: "ts-infra-roads",
+        paint: {
+          "line-color": "#d9b957",
+          "line-width": 1.3,
+          "line-opacity": 0.85,
+        },
+      });
+      map.addLayer({
+        id: "ts-infra-facilities",
+        type: "symbol",
+        source: "ts-infra-facilities",
+        layout: {
+          "icon-image": ["get", "icon"],
+          "icon-size": 0.55,
+          "icon-allow-overlap": true,
+        },
+      });
+      map.addLayer({
+        id: "ts-plan-assets",
+        type: "symbol",
+        source: "ts-plan-assets",
+        layout: {
+          "icon-image": ["get", "icon"],
+          "icon-size": ["case", ["get", "selected"], 1.5, 0.9],
+          "icon-allow-overlap": true,
+        },
+      });
+      map.addLayer({
+        id: "ts-annos",
+        type: "symbol",
+        source: "ts-annos",
+        layout: {
+          "icon-image": ["get", "icon"],
+          "icon-size": 0.9,
+          "icon-allow-overlap": true,
+        },
+      });
+
+      onReady?.();
+      setMapLoaded(true);
     });
 
     // --- interactions -------------------------------------------------------
@@ -217,7 +254,10 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
       const f = e.features?.[0];
       if (!f) return;
       const props = f.properties ?? {};
-      setFacilityDetail({ name: (props.name as string) ?? "", type: (props.type as string) ?? "" });
+      setFacilityDetail({
+        name: (props.name as string) ?? "",
+        type: (props.type as string) ?? "",
+      });
     });
 
     map.on("mousemove", "ts-infra-facilities", (e) => {
@@ -239,7 +279,7 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
   // --- fit to city & load the infra layers once per city --------------------
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || !city) return;
+    if (!map || !city || !mapLoaded) return;
     if (initializedCity.current === city.id) return;
     initializedCity.current = city.id;
 
@@ -253,71 +293,104 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
 
     void Promise.all([
       api.layer(city.id, "buildings").then((data) => {
-        const source = map.getSource("ts-infra-buildings") as maplibregl.GeoJSONSource;
+        const source = map.getSource(
+          "ts-infra-buildings",
+        ) as maplibregl.GeoJSONSource;
         source?.setData(data ?? fc([]));
       }),
       api.layer(city.id, "roads").then((data) => {
-        const source = map.getSource("ts-infra-roads") as maplibregl.GeoJSONSource;
+        const source = map.getSource(
+          "ts-infra-roads",
+        ) as maplibregl.GeoJSONSource;
         source?.setData(data ?? fc([]));
       }),
       api.layer(city.id, "facilities").then((data) => {
         const features = (data?.features ?? []).map((f) => ({
           ...f,
-          properties: { ...f.properties, icon: iconForType((f.properties.type as string) ?? "") },
+          properties: {
+            ...f.properties,
+            icon: iconForType((f.properties.type as string) ?? ""),
+          },
         }));
-        const source = map.getSource("ts-infra-facilities") as maplibregl.GeoJSONSource;
+        const source = map.getSource(
+          "ts-infra-facilities",
+        ) as maplibregl.GeoJSONSource;
         source?.setData(fc(features));
       }),
     ]).catch((err: unknown) => setError(String(err)));
-  }, [city, setError]);
+  }, [city, setError, mapLoaded]);
 
   // --- infrastructure toggles ------------------------------------------------
   useEffect(() => {
     const map = mapRef.current;
-    if (!map) return;
+    if (!map || !mapLoaded) return;
     const setVis = (id: string, on: boolean) =>
       map.setLayoutProperty(id, "visibility", on ? "visible" : "none");
     setVis("ts-infra-buildings", showBuildings && mode === "existing");
     setVis("ts-infra-roads", showRoads && mode === "existing");
     setVis("ts-infra-facilities", showFacilities && mode === "existing");
-  }, [showRoads, showBuildings, showFacilities, mode]);
+  }, [showRoads, showBuildings, showFacilities, mode, mapLoaded]);
 
   // --- suitability overlay ---------------------------------------------------
   useEffect(() => {
     const map = mapRef.current;
-    if (!map) return;
+    if (!map || !mapLoaded) return;
     const setData = (id: string, data?: FeatureCollection | null) => {
       (map.getSource(id) as maplibregl.GeoJSONSource | undefined)?.setData(
         data ?? { type: "FeatureCollection", features: [] },
       );
     };
-    setData("ts-sus-red", mode === "new" && showSuitability ? suitability?.layers.red : null);
-    setData("ts-sus-yellow", mode === "new" && showSuitability ? suitability?.layers.yellow : null);
-    setData("ts-sus-green", mode === "new" && showSuitability ? suitability?.layers.green : null);
+    setData(
+      "ts-sus-red",
+      mode === "new" && showSuitability ? suitability?.layers.red : null,
+    );
+    setData(
+      "ts-sus-yellow",
+      mode === "new" && showSuitability ? suitability?.layers.yellow : null,
+    );
+    setData(
+      "ts-sus-green",
+      mode === "new" && showSuitability ? suitability?.layers.green : null,
+    );
     const setVis = (id: string, on: boolean) =>
       map.setLayoutProperty(id, "visibility", on ? "visible" : "none");
-    setVis("ts-sus-red", Boolean(mode === "new" && showSuitability && suitability));
-    setVis("ts-sus-yellow", Boolean(mode === "new" && showSuitability && suitability));
-    setVis("ts-sus-green", Boolean(mode === "new" && showSuitability && suitability));
-  }, [suitability, mode, showSuitability]);
+    setVis(
+      "ts-sus-red",
+      Boolean(mode === "new" && showSuitability && suitability),
+    );
+    setVis(
+      "ts-sus-yellow",
+      Boolean(mode === "new" && showSuitability && suitability),
+    );
+    setVis(
+      "ts-sus-green",
+      Boolean(mode === "new" && showSuitability && suitability),
+    );
+  }, [suitability, mode, showSuitability, mapLoaded]);
 
   // --- hazard result overlay -------------------------------------------------
   useEffect(() => {
     const map = mapRef.current;
-    if (!map) return;
-    const source = map.getSource("ts-overlay") as maplibregl.GeoJSONSource | undefined;
+    if (!map || !mapLoaded) return;
+    const source = map.getSource("ts-overlay") as
+      maplibregl.GeoJSONSource | undefined;
     let data: FeatureCollection = fc([]);
     if (result?.kind === "flood" && !result.dry) data = result.overlay;
     if (result?.kind === "earthquake") data = result.zones;
     source?.setData(data);
-    map.setLayoutProperty("ts-overlay", "visibility", data.features.length ? "visible" : "none");
-  }, [result]);
+    map.setLayoutProperty(
+      "ts-overlay",
+      "visibility",
+      data.features.length ? "visible" : "none",
+    );
+  }, [result, mapLoaded]);
 
   // --- annotations (flood source / epicenter) --------------------------------
   useEffect(() => {
     const map = mapRef.current;
-    if (!map) return;
-    const annoSource = map.getSource("ts-annos") as maplibregl.GeoJSONSource | undefined;
+    if (!map || !mapLoaded) return;
+    const annoSource = map.getSource("ts-annos") as
+      maplibregl.GeoJSONSource | undefined;
     if (!source || !annoSource) {
       annoSource?.setData(fc([]));
       return;
@@ -330,13 +403,14 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
       },
     ];
     annoSource.setData(fc(features));
-  }, [source, hazard, mode]);
+  }, [source, hazard, mode, mapLoaded]);
 
   // --- planned assets ---------------------------------------------------------
   useEffect(() => {
     const map = mapRef.current;
-    if (!map) return;
-    const source = map.getSource("ts-plan-assets") as maplibregl.GeoJSONSource | undefined;
+    if (!map || !mapLoaded) return;
+    const source = map.getSource("ts-plan-assets") as
+      maplibregl.GeoJSONSource | undefined;
     if (mode !== "new") {
       source?.setData(fc([]));
       return;
@@ -345,17 +419,20 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
       fc(
         placed.map((a) => ({
           type: "Feature",
-          properties: { icon: iconForType(a.type), selected: a.id === selectedAssetId },
+          properties: {
+            icon: iconForType(a.type),
+            selected: a.id === selectedAssetId,
+          },
           geometry: { type: "Point", coordinates: [a.lng, a.lat] },
         })),
       ),
     );
-  }, [placed, selectedAssetId, mode]);
+  }, [placed, selectedAssetId, mode, mapLoaded]);
 
   // --- keep layer stacking ----------------------------------------------------
   useEffect(() => {
     const map = mapRef.current;
-    if (!map) return;
+    if (!map || !mapLoaded) return;
     for (const id of LAYER_ORDER) {
       try {
         map.moveLayer(id);
@@ -363,18 +440,18 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
         // layer not present yet
       }
     }
-  }, [result, suitability, mode, placed]);
+  }, [result, suitability, mode, placed, mapLoaded]);
 
   // --- pointer for planning ---------------------------------------------------
   useEffect(() => {
     const map = mapRef.current;
-    if (!map) return;
+    if (!map || !mapLoaded) return;
     if (pendingAsset) {
       map.getCanvas().style.cursor = "crosshair";
     } else {
       map.getCanvas().style.cursor = "";
     }
-  }, [pendingAsset]);
+  }, [pendingAsset, mapLoaded]);
 
   return <div ref={containerRef} className="map-canvas" />;
 }
