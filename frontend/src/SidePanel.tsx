@@ -71,8 +71,8 @@ function FloodOriginPicker() {
         ))}
       </select>
       <div className="mini-note">
-        Pick a river to flood along the whole channel, or tap the map for a point origin. A river is an estimated,
-        evenly rising water level — not a forecast.
+        Pick a river to flood along its flow path, or tap the map for a point origin. Water is routed downhill along
+        the river's channel and rises above each reach's local bed — a terrain-based hypothetical extent, not a forecast.
       </div>
     </div>
   );

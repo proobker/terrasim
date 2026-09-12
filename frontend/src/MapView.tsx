@@ -19,6 +19,7 @@ const LAYER_ORDER = [
   "ts-sus-green",
   "ts-water",
   "ts-river-sel",
+  "ts-river-flow",
   "ts-overlay",
   "ts-flood-shore",
   "ts-infra-buildings",
@@ -207,6 +208,7 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
         "ts-sus-red",
         "ts-water",
         "ts-river-sel",
+        "ts-river-flow",
         "ts-overlay",
       ]) {
         map.addSource(id, QUIET_SRC as never);
@@ -262,6 +264,20 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
           "line-opacity": 0.95,
         },
         layout: { visibility: "none" },
+      });
+      map.addLayer({
+        id: "ts-river-flow",
+        type: "symbol",
+        source: "ts-river-flow",
+        layout: {
+          "icon-image": "ts-flow",
+          "icon-size": 0.75,
+          "symbol-placement": "line",
+          "symbol-spacing": 150,
+          "icon-rotation-alignment": "map",
+          "icon-allow-overlap": false,
+          visibility: "none",
+        },
       });
       map.addLayer({
         id: "ts-overlay",
@@ -512,23 +528,24 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
     ]).catch((err: unknown) => setError(String(err)));
   }, [city, setError, mapLoaded]);
 
-  // --- selected river highlight (flood origin by river) ----------------------
+  // --- selected river highlight + flow direction (flood origin by river) -----
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !mapLoaded) return;
     const selSource = map.getSource("ts-river-sel") as
       maplibregl.GeoJSONSource | undefined;
-    if (!selSource) return;
+    const flowSource = map.getSource("ts-river-flow") as
+      maplibregl.GeoJSONSource | undefined;
+    if (!selSource || !flowSource) return;
     const highlight =
       hazard === "flood" && selectedRiverId && waterRef.current.has(selectedRiverId)
         ? fc([waterRef.current.get(selectedRiverId)!])
         : fc([]);
     selSource.setData(highlight);
-    map.setLayoutProperty(
-      "ts-river-sel",
-      "visibility",
-      highlight.features.length ? "visible" : "none",
-    );
+    flowSource.setData(highlight);
+    const visible = highlight.features.length ? "visible" : "none";
+    map.setLayoutProperty("ts-river-sel", "visibility", visible);
+    map.setLayoutProperty("ts-river-flow", "visibility", visible);
   }, [selectedRiverId, hazard, mapLoaded]);
 
   // --- infrastructure toggles ------------------------------------------------

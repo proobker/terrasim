@@ -58,7 +58,7 @@ export default function ExposurePanel() {
               </div>
               <div className="stat-box">
                 <div className="num">{stats.water_surface_m.toFixed(0)}m</div>
-                <div className="lbl">water surface</div>
+                <div className="lbl">peak water surface</div>
               </div>
               <div className="stat-box">
                 <div className="num">{(stats.max_depth_m ?? 0).toFixed(1)}m</div>
@@ -71,6 +71,12 @@ export default function ExposurePanel() {
             </div>
             {mode === "new" && placed.length > 0 && (
               <PlannedVerdicts result={result} />
+            )}
+            {result.scenario.river_id && (
+              <div className="mini-note" style={{ marginTop: 6 }}>
+                Water was routed along the river's downhill flow path; the surface is graded per reach and the value
+                shown is the modelled peak. Scenario-based estimate, not a forecast.
+              </div>
             )}
           </>
         )}
