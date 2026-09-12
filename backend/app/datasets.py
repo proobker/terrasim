@@ -81,6 +81,7 @@ def load_assets(city_id: str) -> dict[str, list[dict]]:
                     "name": props.get("name"),
                     "kind": kind,
                     "type": props.get("type"),
+                    "centroid": props.get("centroid"),
                     "geometry": feature.get("geometry"),
                 }
             )

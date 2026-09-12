@@ -31,6 +31,7 @@ import io
 import json
 import math
 import re
+import shutil
 import time
 import unicodedata
 import urllib.parse
@@ -83,6 +84,9 @@ CITIES = {
         "building_bounds": [85.15, 27.54, 85.47, 27.75],
         # Keep every building the mirrors return — no largest-first cap.
         "building_max": None,
+        # Whole-valley buildings come from the cached GeoFabrik PBF, not the
+        # (currently throttled/fake-empty on dev) Overpass mirrors.
+        "buildings_source": "pbf",
         # The valley theatre: the geomorphologic bowl used for the DEM grid,
         # terrain tiles, hazard simulation and the default map view.
         "hazard_bounds": [85.15, 27.54, 85.47, 27.75],
@@ -108,6 +112,12 @@ BUILDING_SPLITS = 6  # chunk grid for the building pass (6x6 keeps dense-chunk
 ROAD_MAX = 4500
 WATER_MAX = 300
 FACILITY_MAX = 500
+
+# When Overpass mirrors are dead or slow, a PBF extract is the deterministic
+# fast path.  GEOFABRIK_NEPAL is downloaded once (cached in data/fetch/) and
+# filtered per city.
+GEOFABRIK_NEPAL = "https://download.geofabrik.de/asia/nepal-latest.osm.pbf"
+PBF_CACHE = ROOT / "data" / "fetch" / "nepal-latest.osm.pbf"
 
 
 def chunk_bboxes(bounds: list[float], splits: int = 3) -> list[tuple[float, float, float, float]]:
@@ -146,6 +156,7 @@ def fetch_osm(
     bounds: list[float],
     building_bounds: list[float] | None = None,
     building_max: int | None = BUILDING_MAX,
+    fetch_buildings: bool = True,
 ) -> dict:
     buildings: dict[int, dict] = {}
     roads: dict[int, dict] = {}
@@ -154,20 +165,21 @@ def fetch_osm(
     # small (6x6 on the building area) so mirrors reliably return full rings,
     # not degenerate ways, and a chunk's extract stays under `out geom 3000`.
     fetch_bounds = building_bounds or bounds
-    for w0, s0, e0, n0 in chunk_bboxes(fetch_bounds, splits=BUILDING_SPLITS):
-        bbox = _bbox_str(w0, s0, e0, n0)
-        buildings_query = (
-            "[out:json][timeout:120];"
-            f"(way[\"building\"]{bbox};);"
-            "out geom 3000;"
-        )
-        try:
-            merge_elements(buildings, post_overpass_any(buildings_query, min_elements=1).get("elements", []))
-        except RuntimeError:
-            print("  !! buildings chunk unavailable, skipped")
-        time.sleep(1)
-        if building_max is not None and len(buildings) >= building_max:
-            break
+    if fetch_buildings:
+        for w0, s0, e0, n0 in chunk_bboxes(fetch_bounds, splits=BUILDING_SPLITS):
+            bbox = _bbox_str(w0, s0, e0, n0)
+            buildings_query = (
+                "[out:json][timeout:120];"
+                f"(way[\"building\"]{bbox};);"
+                "out geom 3000;"
+            )
+            try:
+                merge_elements(buildings, post_overpass_any(buildings_query, min_elements=1).get("elements", []))
+            except RuntimeError:
+                print("  !! buildings chunk unavailable, skipped")
+            time.sleep(1)
+            if building_max is not None and len(buildings) >= building_max:
+                break
     for w0, s0, e0, n0 in chunk_bboxes(bounds, splits=2):
         bbox = _bbox_str(w0, s0, e0, n0)
         roads_query = (
@@ -329,27 +341,149 @@ def to_features(elements: list[dict], geom_attr: str | None, center_only: bool, 
     return features
 
 
+def _ring_area_m2(ring: list[tuple[float, float]]) -> float:
+    """Shoelace area of a closed ring in degrees -> m^2."""
+    n = len(ring)
+    if n < 3:
+        return 0.0
+    s = 0.0
+    for i in range(n - 1):
+        x1, y1 = ring[i]
+        x2, y2 = ring[i + 1]
+        s += x1 * y2 - x2 * y1
+    return abs(s) / 2.0 * (111320.0) ** 2
+
+
 def filter_buildings(features: list[dict], max_area_m2: float = 40.0) -> list[dict]:
     """Keep the largest buildings; drop sliver footprints below an area."""
     def area(feature) -> float:
         coords = feature["geometry"]["coordinates"]
         if feature["geometry"]["type"] != "Polygon" or not coords:
             return 0.0
-        ring = coords[0]
-        n = len(ring)
-        if n < 3:
-            return 0.0
-        s = 0.0
-        for i in range(n - 1):
-            x1, y1 = ring[i]
-            x2, y2 = ring[i + 1]
-            s += x1 * y2 - x2 * y1
-        deg_area = abs(s) / 2.0
-        return deg_area * (111320.0) ** 2  # rough degree area -> m^2
+        return _ring_area_m2(coords[0])
 
     sized = [(f, area(f)) for f in features if area(f) >= max_area_m2]
     sized.sort(key=lambda t: t[1], reverse=True)
     return [f for f, _ in sized]
+
+
+# ---------------------------------------------------------------------------
+# PBF buildings (fallback / default source when Overpass is unusable)
+# ---------------------------------------------------------------------------
+
+def download_file(url: str, dest: Path) -> None:
+    """Download ``url`` to ``dest`` once (resume-free, idempotent)."""
+    if dest.exists() and dest.stat().st_size > 1_000_000:
+        return
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    print(f"  downloading {dest.name} ({dest.stat().st_size if dest.exists() else 0} bytes cached)...")
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(request, timeout=180) as resp, open(tmp, "wb") as fh:
+        shutil.copyfileobj(resp, fh, length=1024 * 1024)
+    tmp.replace(dest)
+    print(f"  downloaded {dest.name} ({dest.stat().st_size / 1e6:.1f} MB)")
+
+
+def buildings_from_pbf(
+    pbf_path: Path, bounds: list[float], min_area_m2: float = 40.0
+) -> list[dict]:
+    """Return `building`-tagged way footprints (Polygons) inside ``bounds``.
+
+    Reads the (cached) GeoFabrik extract with python-osmium. Works as the
+    deterministic fast path when the Overpass mirrors are throttled or
+    unreachable. Only closed rings whose map bbox overlaps ``bounds`` (and
+    that meet ``min_area_m2``) survive. Progress prints keep long extracts
+    from looking frozen.
+    """
+    import osmium  # type: ignore[import-not-found]
+
+    w0, s0, e0, n0 = bounds
+
+    class _Handler(osmium.SimpleHandler):
+        def __init__(self) -> None:
+            super().__init__()
+            self.out: list[dict] = []
+            self.scanned = 0
+            self.next_progress = 150_000
+
+        def way(self, way: osmium.osm.Way) -> None:
+            self.scanned += 1
+            if self.scanned >= self.next_progress:
+                print(f"  [pbf] scanned {self.scanned // 1000}k ways, kept {len(self.out)}", flush=True)
+                self.next_progress += 150_000
+            if not way.tags.get("building"):
+                return
+            pts: list[tuple[float, float]] = []
+            for ref in way.nodes:
+                if not ref.location.valid():
+                    return  # nodes missing from the extract; skip the way
+                pts.append((ref.location.lon, ref.location.lat))
+            if len(pts) < 4:
+                return
+            lon_min = min(p[0] for p in pts)
+            lon_max = max(p[0] for p in pts)
+            lat_min = min(p[1] for p in pts)
+            lat_max = max(p[1] for p in pts)
+            # bbox overlap keeps ways straddling the valley edge intact
+            if lon_max < w0 or lon_min > e0 or lat_max < s0 or lat_min > n0:
+                return
+            ring = pts[:]
+            if ring[0] != ring[-1]:
+                ring.append(ring[0])
+            if _ring_area_m2(ring) < min_area_m2:
+                return
+            props: dict = {"id": way.id}
+            props["centroid"] = [round((lon_min + lon_max) / 2, 6), round((lat_min + lat_max) / 2, 6)]
+            if name := way.tags.get("name"):
+                props["name"] = name
+            if btype := way.tags.get("building"):
+                props["type"] = btype
+            for tag in ("height", "building:levels"):
+                if val := way.tags.get(tag):
+                    props[tag] = val
+            self.out.append(
+                {
+                    "type": "Feature",
+                    "properties": props,
+                    "geometry": {"type": "Polygon", "coordinates": [ring]},
+                }
+            )
+
+    handler = _Handler()
+    handler.apply_file(str(pbf_path), locations=True, idx="sparse_file_array")
+    return handler.out
+
+
+def pbf_buildings(bounds: list[float]) -> list[dict]:
+    """Cached-PBF building features (bbox + sliver filtered in-line)."""
+    download_file(GEOFABRIK_NEPAL, PBF_CACHE)
+    return buildings_from_pbf(PBF_CACHE, bounds)
+
+
+def write_buildings_from_pbf(city_id: str) -> int:
+    """Regenerate only ``buildings.geojson`` from the PBF (no Overpass)."""
+    cfg = CITIES[city_id]
+    out = BUNDLES / city_id
+    bounds = cfg.get("building_bounds") or cfg["bounds"]
+    building_max = cfg.get("building_max", BUILDING_MAX)
+    print(f"[{city_id}] reading PBF (this can take a minute)...", flush=True)
+    features = pbf_buildings(bounds)
+    if building_max is not None:
+        print(f"[{city_id}] sorting {len(features)} by area for cap of {building_max}", flush=True)
+        features = sorted(
+            features,
+            key=lambda f: _ring_area_m2(f["geometry"]["coordinates"][0]),
+            reverse=True,
+        )[:building_max]
+    dest = out / "buildings.geojson"
+    part = dest.with_suffix(dest.suffix + ".part")
+    print(f"[{city_id}] writing {dest.name} ...", flush=True)
+    with open(part, "w", encoding="utf-8") as fh:
+        json.dump({"type": "FeatureCollection", "features": features}, fh, separators=(",", ":"))
+    part.replace(dest)
+    print(f"[{city_id}] buildings: {len(features)} ({dest.stat().st_size / 1e6:.1f} MB)")
+    return len(features)
 
 
 # ---------------------------------------------------------------------------
@@ -924,26 +1058,35 @@ def build_city(city_id: str, force: bool = False) -> None:
     out = BUNDLES / city_id
     out.mkdir(parents=True, exist_ok=True)
 
-    print(f"[{city_id}] fetching OSM (overpass, mirror rotation)...")
-    osm = fetch_osm(
-        cfg["bounds"],
-        building_bounds=cfg.get("building_bounds"),
-        building_max=cfg.get("building_max", BUILDING_MAX),
-    )
+    if cfg.get("buildings_source") == "pbf":
+        print(f"[{city_id}] buildings from cached GeoFabrik PBF...")
+        buildings_raw = pbf_buildings(cfg.get("building_bounds") or cfg["bounds"])
+        if cfg.get("building_max", BUILDING_MAX) is not None:
+            buildings_raw = buildings_raw[: cfg["building_max"]]
+        buildings = buildings_raw
+        print(f"[{city_id}] fetching OSM (overpass, mirror rotation)...")
+        osm = fetch_osm(cfg["bounds"], fetch_buildings=False)
+    else:
+        print(f"[{city_id}] fetching OSM (overpass, mirror rotation)...")
+        osm = fetch_osm(
+            cfg["bounds"],
+            building_bounds=cfg.get("building_bounds"),
+            building_max=cfg.get("building_max", BUILDING_MAX),
+        )
+        buildings = to_features(
+            osm["buildings"].get("elements", []),
+            "geometry",
+            False,
+            extra_tags=("height", "building:levels"),
+            add_id=True,
+        )
+        # Real footprints: drop sliver rings and any degenerate 2-point ways the
+        # mirrors returned, then keep the largest (most visible) when capped.
+        # Uncapped cities (aka all-valley fetches) keep every building.
+        buildings = filter_buildings(buildings)
+        if cfg.get("building_max", BUILDING_MAX) is not None:
+            buildings = buildings[: cfg["building_max"]]
 
-    buildings = to_features(
-        osm["buildings"].get("elements", []),
-        "geometry",
-        False,
-        extra_tags=("height", "building:levels"),
-        add_id=True,
-    )
-    # Real footprints: drop sliver rings and any degenerate 2-point ways the
-    # mirrors returned, then keep the largest (most visible) when capped.
-    # Uncapped cities (aka all-valley fetches) keep every building.
-    buildings = filter_buildings(buildings)
-    if cfg.get("building_max", BUILDING_MAX) is not None:
-        buildings = buildings[: cfg["building_max"]]
     roads = to_features(osm["roads"].get("elements", []), "geometry", False, keep_lines=True)
     water = to_features(
         osm["water"].get("elements", []),
@@ -1024,10 +1167,24 @@ def main() -> None:
         action="store_true",
         help="re-run water normalization on existing bundles (no network)",
     )
+    parser.add_argument(
+        "--pbf-buildings",
+        action="store_true",
+        help="regenerate only buildings.geojson for the target city/ies from the "
+        "cached GeoFabrik PBF (no Overpass, no DEM re-fetch)",
+    )
     args = parser.parse_args()
 
     BUNDLES.mkdir(parents=True, exist_ok=True)
     targets = list(CITIES) if args.all else ([args.city] if args.city else [])
+    if args.pbf_buildings:
+        if not targets:
+            parser.error("pass --pbf-buildings with --city <id> or --all")
+        for city_id in targets:
+            if city_id not in CITIES:
+                parser.error(f"unknown city: {city_id}")
+            write_buildings_from_pbf(city_id)
+        return
     if args.normalize_water:
         targets = (targets or list(CITIES))
         for city_id in targets:

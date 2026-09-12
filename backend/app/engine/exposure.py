@@ -32,7 +32,16 @@ def _densify(points, step_deg: float):
     return out
 
 
-def _asset_points(geometry: Any, step_deg: float) -> list[tuple[float, float]]:
+def _asset_points(feature: dict, step_deg: float) -> list[tuple[float, float]]:
+    geometry = feature.get("geometry")
+    # Fast path: the PBF extractor pre-computes a bbox centroid, so exposure
+    # on huge building sets never materialises a Shapely polygon per asset.
+    # ``load_assets`` flattens the centroid into the asset dict; raw GeoJSON
+    # features with a ``properties.centroid`` also work.
+    props = feature.get("properties") or {}
+    centroid = feature.get("centroid") or props.get("centroid")
+    if geometry and geometry.get("type") == "Polygon" and isinstance(centroid, (list, tuple)) and len(centroid) == 2:
+        return [tuple(centroid)]
     geom = shape(geometry) if isinstance(geometry, dict) else geometry
     gtype = geom.geom_type
     if gtype == "Point":
@@ -64,17 +73,18 @@ def evaluate_flood_exposure(
         counts = {"flooded": 0, "total": 0}
         for feature in features:
             counts["total"] += 1
-            points = _asset_points(feature.get("geometry"), step_deg)
+            points = _asset_points(feature, step_deg)
             at_risk = any(
                 flooded_mask[grid.cell(lng, lat)] for lng, lat in points
             )
             if at_risk:
                 counts["flooded"] += 1
+                props = feature.get("properties") or {}
                 affected_ids.append(
                     {
                         "kind": kind,
-                        "name": feature.get("properties", {}).get("name"),
-                        "id": feature.get("properties", {}).get("id"),
+                        "name": feature.get("name") or props.get("name"),
+                        "id": feature.get("id") or props.get("id"),
                     }
                 )
         results[kind] = counts
@@ -101,7 +111,7 @@ def evaluate_quake_exposure(
         counts["none"] = 0
         for feature in features:
             counts["total"] += 1
-            points = _asset_points(feature.get("geometry"), step_deg)
+            points = _asset_points(feature, step_deg)
             worst: tuple[int, str | None] = (0, None)
             for lng, lat in points:
                 band = None
@@ -112,14 +122,20 @@ def evaluate_quake_exposure(
             band = worst[1] or "none"
             counts[band] += 1
             if band in earthquake.BANDS:
-                exposed.append(
-                    {
-                        "kind": kind,
-                        "name": feature.get("properties", {}).get("name"),
-                        "id": feature.get("properties", {}).get("id"),
-                        "band": band,
-                    }
-                )
+                if kind == "buildings":
+                    # Thousands of buildings carry bands; the frontend tints
+                    # by id only, so keep the payload compact for them.
+                    exposed.append({"id": feature["id"], "band": band})
+                else:
+                    props = feature.get("properties") or {}
+                    exposed.append(
+                        {
+                            "kind": kind,
+                            "name": feature.get("name") or props.get("name"),
+                            "id": feature.get("id") or props.get("id"),
+                            "band": band,
+                        }
+                    )
         results[kind] = counts
     return {"assets": results, "exposed": exposed}
 
