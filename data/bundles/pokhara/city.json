@@ -1,0 +1,26 @@
+{
+  "id": "pokhara",
+  "name": "Pokhara",
+  "mode": "new",
+  "status": "valley floor + lakeside, suitable for planning demos",
+  "center": [
+    83.99000000000001,
+    28.22
+  ],
+  "bounds": [
+    83.9,
+    28.14,
+    84.08,
+    28.3
+  ],
+  "zoom": 12,
+  "grid": {
+    "ncols": 601,
+    "nrows": 534,
+    "res_deg": 0.0003
+  },
+  "attribution": [
+    "Map data \u00a9 OpenStreetMap contributors (ODbL)",
+    "Elevation: Mapzen terrain tiles (Terrarium)"
+  ]
+}

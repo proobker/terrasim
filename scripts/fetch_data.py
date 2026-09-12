@@ -42,7 +42,7 @@ OVERPASS_ENDPOINTS = [
     "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
     "https://overpass-api.de/api/interpreter",
 ]
-OVERPASS_TIMEOUT = 90
+OVERPASS_TIMEOUT = 40
 TERRARIUM = "https://s3.amazonaws.com/elevation-tiles-prod/terrarium"
 
 # Amenity types grouped into small per-type queries so a single failed
@@ -76,25 +76,91 @@ CITIES = {
 }
 
 RES_DEG = 0.0003  # ~30-33 m cell at Nepal latitudes
-BUILDING_MAX = 2500
-ROAD_MAX = 2500
+BUILDING_MAX = 4500  # target total, accumulated across chunked fetches
+ROAD_MAX = 4500
 FACILITY_MAX = 500
 
 
-def post_overpass(query: str, endpoint_order: list[str] | None = None, min_elements: int = 0) -> dict:
-    """POST a query to the healthiest Overpass mirror, with retries.
+def chunk_bboxes(bounds: list[float], splits: int = 3) -> list[tuple[float, float, float, float]]:
+    """Split a bounds box into a 3x3-ish grid of smaller bboxes.
 
-    Endpoints are notoriously flaky; we rotate mirrors and back off
-    between attempts. A result is returned as soon as it parses as JSON
-    and carries at least ``min_elements`` elements — a low bar that still
-    rejects the "healthy but empty" failure mode of some mirrors. When no
-    mirror clears the bar, the largest response is returned.
+    Overpass mirrors degrade `out geom` geometry on very large extracts;
+    tiny chunks reliably return full coordinates.
+    """
+    w, s, e, n = bounds
+    lat_edges = [s + (n - s) * i / splits for i in range(splits + 1)]
+    lng_edges = [w + (e - w) * i / splits for i in range(splits + 1)]
+    chunks = []
+    for a in range(splits):
+        for b in range(splits):
+            s0, n0 = lat_edges[a], lat_edges[a + 1]
+            w0, e0 = lng_edges[b], lng_edges[b + 1]
+            chunks.append((w0, s0, e0, n0))
+    return chunks
+
+def _bbox_str(w: float, s: float, e: float, n: float) -> str:
+    return f"({s:.4f},{w:.4f},{n:.4f},{e:.4f})"
+
+
+def merge_elements(target: dict[int, dict], incoming: list[dict]) -> None:
+    """Merge by id, preferring the version with richer geometry."""
+    for el in incoming:
+        existing = target.get(el["id"])
+        if existing is None:
+            target[el["id"]] = el
+            continue
+        if len(el.get("geometry", [])) > len(existing.get("geometry", [])):
+            target[el["id"]] = el
+
+
+def fetch_osm(bounds: list[float]) -> dict:
+    buildings: dict[int, dict] = {}
+    roads: dict[int, dict] = {}
+    for w0, s0, e0, n0 in chunk_bboxes(bounds, splits=2):
+        bbox = _bbox_str(w0, s0, e0, n0)
+        buildings_query = (
+            "[out:json][timeout:120];"
+            f"(way[\"building\"]{bbox};);"
+            "out center 4000;"
+        )
+        roads_query = (
+            "[out:json][timeout:120];"
+            '(way["highway"~"^(motorway|trunk|primary|secondary|tertiary|residential|unclassified|living_street)$"]'
+            f"{bbox};);"
+            "out geom 3000;"
+        )
+        try:
+            merge_elements(buildings, post_overpass_any(buildings_query, min_elements=1).get("elements", []))
+        except RuntimeError:
+            print("  !! buildings chunk unavailable, skipped")
+        time.sleep(1)
+        try:
+            merge_elements(roads, post_overpass_any(roads_query, min_elements=1).get("elements", []))
+        except RuntimeError:
+            print("  !! roads chunk unavailable, skipped")
+        time.sleep(1)
+        if len(buildings) >= BUILDING_MAX and len(roads) >= ROAD_MAX:
+            break
+    return {
+        "buildings": {"elements": list(buildings.values())},
+        "roads": {"elements": list(roads.values())},
+        "facilities_result": fetch_facilities(bounds),
+    }
+
+
+def post_overpass(query: str, endpoint_order: list[str] | None = None, min_elements: int = 0) -> dict:
+    """POST a query to a healthy Overpass mirror.
+
+    Mirrors reject bursts: try each mirror exactly once (in a shuffled
+    order), keep the most complete response, and never retry the same
+    mirror in a loop. A response parsing as JSON with >= ``min_elements``
+    elements is returned immediately; otherwise the largest response wins
+    and a hard failure raises.
     """
     endpoints = endpoint_order or OVERPASS_ENDPOINTS
-    last_error: str | None = None
     best: dict | None = None
-    for attempt in range(2 * len(endpoints)):
-        url = endpoints[attempt % len(endpoints)]
+    last_error: str | None = None
+    for url in endpoints:
         body = urllib.parse.urlencode({"data": query}).encode()
         request = urllib.request.Request(
             url,
@@ -105,18 +171,21 @@ def post_overpass(query: str, endpoint_order: list[str] | None = None, min_eleme
             with urllib.request.urlopen(request, timeout=OVERPASS_TIMEOUT) as resp:
                 payload = json.loads(resp.read())
             count = len(payload.get("elements", []))
-            if "elements" in payload and (count >= min_elements or (not payload["elements"] and min_elements == 0)):
-                time.sleep(0.8)  # be polite to the mirror
+            if "elements" in payload and count >= min_elements:
+                time.sleep(0.8)
                 return payload
             if best is None or count > len(best.get("elements", [])):
                 best = payload
-            last_error = f"{url}: only {count} elements (wanted {'any' if min_elements == 0 else min_elements})"
+            last_error = f"{url}: only {count} elements (wanted at least {min_elements})"
         except Exception as exc:  # transient mirror failure
             last_error = f"{url}: {exc!r}"
-        time.sleep(5 + 10 * attempt)
-    if best is not None:
-        return best
-    raise RuntimeError(f"all Overpass mirrors failed: {last_error}")
+        time.sleep(1.5)
+    if best is None:
+        raise RuntimeError(f"all Overpass mirrors failed: {last_error}")
+    if min_elements > 0 and not best.get("elements"):
+        # Rather than fail the whole build, callers may treat this as a skip.
+        raise RuntimeError(f"every mirror returned empty for a non-empty query ({last_error})")
+    return best
 
 
 def post_overpass_any(query: str, min_elements: int = 0) -> dict:
@@ -149,27 +218,6 @@ def fetch_facilities(bounds: list[float]) -> list[dict]:
     return list(elements.values())
 
 
-def fetch_osm(bounds: list[float]) -> dict:
-    w, s, e, n = bounds
-    bbox = f"({s:.4f},{w:.4f},{n:.4f},{e:.4f})"
-    roads_query = (
-        "[out:json][timeout:120];"
-        '(way["highway"~"^(motorway|trunk|primary|secondary|tertiary|residential|unclassified|living_street)$"]'
-        f"{bbox};);"
-        f"out geom {ROAD_MAX};"
-    )
-    buildings_query = (
-        "[out:json][timeout:120];"
-        f"(way[\"building\"]{bbox};);"
-        f"out geom {BUILDING_MAX};"
-    )
-    return {
-        "buildings": post_overpass_any(buildings_query, min_elements=1),
-        "roads": post_overpass_any(roads_query, min_elements=1),
-        "facilities_result": fetch_facilities(bounds),
-    }
-
-
 def element_centroid(element: dict) -> tuple[float, float] | None:
     if "lat" in element and "lon" in element:
         return element["lon"], element["lat"]
@@ -179,7 +227,7 @@ def element_centroid(element: dict) -> tuple[float, float] | None:
     return None
 
 
-def to_features(elements: list[dict], geom_attr: str | None, center_only: bool) -> list[dict]:
+def to_features(elements: list[dict], geom_attr: str | None, center_only: bool, keep_lines: bool = False) -> list[dict]:
     features = []
     for el in elements:
         props: dict = {"name": el.get("tags", {}).get("name"),
@@ -202,8 +250,11 @@ def to_features(elements: list[dict], geom_attr: str | None, center_only: bool) 
                 continue
             if len(coords) == 2:
                 gtype, gcoords = "LineString", coords
+            elif len(coords) >= 4 and not keep_lines:
+                # GeoJSON Polygon coordinates = [ring, ...]
+                gtype, gcoords = "Polygon", [coords + [coords[0]]]
             elif len(coords) >= 4:
-                gtype, gcoords = "Polygon", coords + [coords[0]]
+                gtype, gcoords = "LineString", coords
             else:
                 continue
             features.append(
@@ -220,7 +271,7 @@ def filter_buildings(features: list[dict], max_area_m2: float = 40.0) -> list[di
     """Keep the largest buildings; drop sliver footprints below an area."""
     def area(feature) -> float:
         coords = feature["geometry"]["coordinates"]
-        if not coords:
+        if feature["geometry"]["type"] != "Polygon" or not coords:
             return 0.0
         ring = coords[0]
         n = len(ring)
@@ -364,9 +415,9 @@ def build_city(city_id: str, force: bool = False) -> None:
     print(f"[{city_id}] fetching OSM (overpass, mirror rotation)...")
     osm = fetch_osm(cfg["bounds"])
 
-    buildings = to_features(osm["buildings"].get("elements", []), "geometry", False)
-    buildings = filter_buildings(buildings)
-    roads = to_features(osm["roads"].get("elements", []), "geometry", False)
+    buildings = to_features(osm["buildings"].get("elements", []), None, True)
+    buildings = buildings[:BUILDING_MAX]
+    roads = to_features(osm["roads"].get("elements", []), "geometry", False, keep_lines=True)
     facilities = to_features(osm["facilities_result"], None, True)
     facilities = facilities[:FACILITY_MAX]
 

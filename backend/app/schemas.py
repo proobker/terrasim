@@ -12,11 +12,20 @@ class GeoPoint(BaseModel):
     lat: float = Field(gt=-90, lt=90)
 
 
+class ScenarioAsset(BaseModel):
+    kind: str
+    id: str | None = None
+    name: str | None = None
+    lng: float
+    lat: float
+
+
 class FloodScenario(BaseModel):
     city_id: str
     source: GeoPoint
     level_m: float = Field(default=2.0, gt=-20, lt=5000)
     mode: Literal["rise", "absolute"] = "rise"
+    assets: list[ScenarioAsset] | None = None
 
 
 class EarthquakeScenario(BaseModel):
@@ -24,6 +33,7 @@ class EarthquakeScenario(BaseModel):
     epicenter: GeoPoint
     magnitude: float = Field(default=6.5, gt=0, lt=10)
     depth_km: float = Field(default=10.0, ge=0, lt=300)
+    assets: list[ScenarioAsset] | None = None
 
 
 class SuitabilityRequest(BaseModel):

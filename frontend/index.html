@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%23071d18'/%3E%3Crect x='2' y='2' width='5' height='5' fill='%2343c7d8'/%3E%3Crect x='9' y='2' width='5' height='5' fill='%23159a9c'/%3E%3Crect x='2' y='9' width='5' height='5' fill='%2355b86a'/%3E%3Crect x='9' y='9' width='5' height='5' fill='%23e6c66a'/%3E%3C/svg%3E" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>terrasim — Building Resilient Areas</title>
+    <style>
+      /* critical first-paint styling: never show a bare dark page */
+      html, body, #root {
+        margin: 0;
+        height: 100%;
+        background: #071d18;
+      }
+      body {
+        background:
+          radial-gradient(1200px 600px at 20% -10%, rgba(21, 154, 156, 0.14), transparent 60%),
+          radial-gradient(900px 500px at 90% 110%, rgba(85, 184, 106, 0.12), transparent 60%),
+          #071d18;
+        color: #1e352b;
+        font-family: "Segoe UI", system-ui, sans-serif;
+      }
+      #root { position: relative; z-index: 1; }
+      #boot {
+        position: fixed;
+        inset: 0;
+        z-index: 0;
+        display: grid;
+        place-items: center;
+        text-align: center;
+      }
+      #boot .l {
+        font-family: "Courier New", monospace;
+        font-weight: 900;
+        font-size: 32px;
+        letter-spacing: 2px;
+        color: #e6c66a;
+        text-shadow: 0 2px 0 #0009;
+        white-space: nowrap;
+      }
+      #boot .t {
+        font-family: "Courier New", monospace;
+        font-size: 11px;
+        letter-spacing: 1.5px;
+        text-transform: uppercase;
+        color: #65746b;
+        margin-top: 8px;
+      }
+      #boot .s {
+        width: 140px;
+        height: 12px;
+        margin: 18px auto 0;
+        border: 3px solid #141414;
+        border-radius: 6px;
+        background: #00000033;
+        overflow: hidden;
+      }
+      #boot .s i {
+        display: block;
+        height: 100%;
+        width: 70%;
+        background: repeating-linear-gradient(45deg, #43c7d8 0 6px, #2fa8ba 6px 12px);
+        animation: bootp 1s steps(8) infinite;
+      }
+      @keyframes bootp {
+        0% { background-position: 0 0; }
+        100% { background-position: 24px 0; }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="boot">
+      <div>
+        <div class="l">TERRASIM</div>
+        <div class="t">Building Resilient Areas for Climate &amp; Emergencies</div>
+        <div class="s"><i></i></div>
+      </div>
+    </div>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+    <script>
+      window.addEventListener("load", function () {
+        setTimeout(function () {
+          var boot = document.getElementById("boot");
+          if (boot) boot.remove();
+        }, 1200);
+      });
+    </script>
+  </body>
+</html>

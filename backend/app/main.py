@@ -14,6 +14,22 @@ from app import __version__, datasets
 from app.engine import earthquake, exposure, flood, suitability
 from app.schemas import EarthquakeScenario, FloodScenario, SuitabilityRequest
 
+
+def _assets_for(scenario: FloodScenario | EarthquakeScenario) -> dict[str, list[dict]]:
+    """Real OSM assets, or the planner's proposed layout when supplied."""
+    if scenario.assets is not None:
+        assets: dict[str, list[dict]] = {}
+        for a in scenario.assets if isinstance(scenario.assets, list) else []:
+            assets.setdefault(a.kind, []).append(
+                {
+                    "type": "Feature",
+                    "properties": {"kind": a.kind, "id": a.id, "name": a.name},
+                    "geometry": {"type": "Point", "coordinates": [a.lng, a.lat]},
+                }
+            )
+        return assets
+    return datasets.load_assets(scenario.city_id)
+
 app = FastAPI(
     title="terrasim",
     version=__version__,
@@ -63,7 +79,7 @@ def city_layer(city_id: str, kind: str) -> dict:
 def simulate_flood(scenario: FloodScenario) -> dict:
     try:
         grid = datasets.load_city_dem(scenario.city_id)
-        assets = datasets.load_assets(scenario.city_id)
+        assets = _assets_for(scenario)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
 
@@ -79,6 +95,7 @@ def simulate_flood(scenario: FloodScenario) -> dict:
         "scenario": scenario.model_dump(),
         "stats": result["stats"],
         "overlay": result["flooded"],
+        "dry": result["dry"],
     }
     if not result["dry"]:
         masked, _ = flood.flood_mask(
@@ -96,7 +113,7 @@ def simulate_flood(scenario: FloodScenario) -> dict:
 def simulate_earthquake(scenario: EarthquakeScenario) -> dict:
     try:
         grid = datasets.load_city_dem(scenario.city_id)
-        assets = datasets.load_assets(scenario.city_id)
+        assets = _assets_for(scenario)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
 
@@ -114,10 +131,13 @@ def simulate_earthquake(scenario: EarthquakeScenario) -> dict:
         "magnitude": scenario.magnitude,
         "depth_km": scenario.depth_km,
     }
+    zones_features = [
+        feature for band_fc in result["zones"].values() for feature in band_fc.get("features", [])
+    ]
     return {
         "kind": "earthquake",
         "scenario": scenario.model_dump(),
-        "zones": result["zones"],
+        "zones": {"type": "FeatureCollection", "features": zones_features},
         "bands": result["bands"],
         "area_km2": result["area_km2"],
         "exposure": exposure.evaluate(grid, assets, hazard),
