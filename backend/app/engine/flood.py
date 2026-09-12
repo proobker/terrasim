@@ -65,28 +65,50 @@ def flood_stats(grid: DemGrid, mask: np.ndarray, surface: float) -> dict:
     area_m2 = cells * grid.cell_area_m2(
         (grid.min_lat + grid.max_lat) / 2.0
     )
+    depths = np.where(mask, surface - grid.elev, 0.0)
+    deep_mask = depths >= DEPTH_CORE_M
     return {
         "cells_flooded": cells,
         "cell_resolution_m": grid.res_lat * 111.32 * 1000,
         "water_surface_m": surface,
+        "max_depth_m": round(float(depths.max()), 2) if cells else 0.0,
+        "mean_depth_m": round(float(depths[mask].mean()), 2) if cells else 0.0,
+        "deep_area_km2": round(float(deep_mask.sum()) * grid.cell_area_m2((grid.min_lat + grid.max_lat) / 2.0) / 1e6, 3) if cells else 0.0,
         "area_km2": round(area_m2 / 1e6, 3),
         "percent_of_cells": round(100.0 * mask.mean(), 2),
     }
 
 
-def flood_to_featurecollections(grid: DemGrid, mask: np.ndarray) -> dict:
-    """Return rendered flood overlay GeoJSON (downsampled + merged)."""
-    polygons = mask_to_polygons(mask, grid)
+DEPTH_CORE_M = 1.0
+
+
+def flood_to_featurecollections(
+    grid: DemGrid, mask: np.ndarray, surface: float | None = None
+) -> dict:
+    """Return rendered flood overlay GeoJSON.
+
+    ``surface`` enables the deeper ``flood-deep`` band (cells at least
+    ``DEPTH_CORE_M`` below the water surface) so the modelled water reads as
+    a pond with a darker core instead of a flat translucent sheet.
+    """
+    features = [
+        {"type": "Feature", "properties": {"class": "flood"}, "geometry": polygon}
+        for polygon in mask_to_polygons(mask, grid)
+    ]
+    if surface is not None:
+        deep = np.logical_and(mask, (surface - grid.elev) >= DEPTH_CORE_M)
+        if deep.any():
+            for polygon in mask_to_polygons(deep, grid):
+                features.append(
+                    {
+                        "type": "Feature",
+                        "properties": {"class": "flood-deep"},
+                        "geometry": polygon,
+                    }
+                )
     return {
         "type": "FeatureCollection",
-        "features": [
-            {
-                "type": "Feature",
-                "properties": {"class": "flood"},
-                "geometry": polygon,
-            }
-            for polygon in polygons
-        ],
+        "features": features,
     }
 
 
@@ -96,9 +118,9 @@ def run(grid: DemGrid, source_lng: float, source_lat: float, level_m: float, mod
         return {
             "dry": True,
             "flooded": {"type": "FeatureCollection", "features": []},
-            "stats": {"cells_flooded": 0, "area_km2": 0.0, "percent_of_cells": 0.0},
+            "stats": {"cells_flooded": 0, "area_km2": 0.0, "percent_of_cells": 0.0, "max_depth_m": 0.0},
         }
-    layers = flood_to_featurecollections(grid, mask)
+    layers = flood_to_featurecollections(grid, mask, surface)
     stats = flood_stats(grid, mask, surface)
     return {
         "dry": False,

@@ -7,11 +7,11 @@ FastAPI server hosting the simulation + data layer. Run locally:
 
 from __future__ import annotations
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from app import __version__, datasets
-from app.engine import earthquake, exposure, flood, suitability
+from app.engine import earthquake, exposure, flood, suitability, terrain_tiles
 from app.schemas import EarthquakeScenario, FloodScenario, SuitabilityRequest
 
 
@@ -73,6 +73,22 @@ def city_layer(city_id: str, kind: str) -> dict:
         raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/cities/{city_id}/terrain/{z}/{x}/{y}.png")
+def terrain_tile(city_id: str, z: int, x: int, y: int) -> Response:
+    """Terrarium-encoded DEM tile for the 3D terrain layer."""
+    try:
+        data = terrain_tiles.tile_bytes(city_id, z, x, y)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    if data is None:
+        raise HTTPException(status_code=404, detail="terrain tile outside DEM coverage")
+    return Response(
+        content=data,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
 
 
 @app.post("/api/simulate/flood")

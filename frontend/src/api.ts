@@ -53,4 +53,8 @@ export const api = {
   async suitability(cityId: string): Promise<SuitabilityResult> {
     return request(`/api/cities/${cityId}/suitability`, { method: "POST", body: JSON.stringify({ city_id: cityId }) });
   },
+
+  terrainUrl(cityId: string) {
+    return `${API_BASE}/api/cities/${cityId}/terrain/{z}/{x}/{y}.png`;
+  },
 };

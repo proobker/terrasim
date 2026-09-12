@@ -1,19 +1,15 @@
 import { useEffect } from "react";
-import { api } from "./api";
+import { useCityBootstrap } from "./bootstrap";
 import { useStore } from "./store";
 import type { CityInfo } from "./types";
 
 export default function Topbar() {
+  useCityBootstrap();
   const cities = useStore((s) => s.cities);
-  const setCities = useStore((s) => s.setCities);
   const city = useStore((s) => s.city);
   const selectCity = useStore((s) => s.selectCity);
   const mode = useStore((s) => s.mode);
   const setMode = useStore((s) => s.setMode);
-
-  useEffect(() => {
-    void api.cities().then(setCities).catch(() => setCities([]));
-  }, [setCities]);
 
   useEffect(() => {
     if (!city && cities.length > 0) {

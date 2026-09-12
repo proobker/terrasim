@@ -101,17 +101,35 @@ def quake_zones_at(lng: float, lat: float, grid: DemGrid, epicenter_lng: float, 
     return band_for(index), index
 
 
+def band_radius_km(band: str, magnitude: float, depth_km: float) -> float:
+    """Approximate horizontal radius (km) where a band's intensity threshold
+    is crossed, inverting the simple attenuation proxy."""
+    threshold = dict(zip(BANDS, BAND_THRESHOLDS))[band]
+    mag_factor = (max(magnitude, 0.0) / REFERENCE_MAGNITUDE) ** MAGNITUDE_POWER
+    if threshold <= 0:
+        return 0.0
+    ratio = threshold * REFERENCE_DISTANCE_KM / max(mag_factor, 1e-9)
+    if ratio >= REFERENCE_DISTANCE_KM:
+        return 0.0
+    slant = max(REFERENCE_DISTANCE_KM * (ratio / REFERENCE_DISTANCE_KM) ** (-2.0 / 3.0) - REFERENCE_DISTANCE_KM, 0.0)
+    r = max(slant * slant - max(depth_km, 0.0) ** 2, 0.0)
+    return round(float(np.sqrt(r)), 1)
+
+
 def run(grid: DemGrid, epicenter_lng: float, epicenter_lat: float, magnitude: float, depth_km: float) -> dict:
     zones = quake_zones(grid, epicenter_lng, epicenter_lat, magnitude, depth_km)
     labels = quake_labels(grid, epicenter_lng, epicenter_lat, magnitude, depth_km)
     area_by_band = {}
+    radii_km = {}
     for band_idx, band_name in enumerate(BANDS, start=1):
         cells = int((labels == band_idx).sum())
         area_by_band[band_name] = round(
             cells * grid.cell_area_m2((grid.min_lat + grid.max_lat) / 2.0) / 1e6, 2
         )
+        radii_km[band_name] = band_radius_km(band_name, magnitude, depth_km)
     return {
         "zones": zones,
         "bands": intensity_band_thresholds(),
         "area_km2": area_by_band,
+        "radii_km": radii_km,
     }

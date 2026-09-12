@@ -61,6 +61,10 @@ export default function ExposurePanel() {
                 <div className="lbl">water surface</div>
               </div>
               <div className="stat-box">
+                <div className="num">{(stats.max_depth_m ?? 0).toFixed(1)}m</div>
+                <div className="lbl">max modelled depth</div>
+              </div>
+              <div className="stat-box">
                 <div className="num">{exposure ? Object.keys(exposure.assets).length : 0}</div>
                 <div className="lbl">asset types modelled</div>
               </div>

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import struct
+import zlib
 from collections import deque
 from pathlib import Path
 
@@ -10,7 +12,7 @@ import numpy as np
 import pytest
 
 import app.datasets as datasets
-from app.engine import earthquake, exposure, flood, suitability
+from app.engine import earthquake, exposure, flood, suitability, terrain_tiles
 
 
 def make_city_bundle(tmp_path: Path, city_id: str = "testcity", n: int = 24) -> Path:
@@ -177,3 +179,86 @@ def test_suitability_returns_all_three_classes(city):
     result = suitability.run(grid)
     assert set(result["legend"]) == {"green", "yellow", "red"}
     assert any(result["layers"][k]["features"] for k in result["layers"])
+
+
+def test_flood_overlay_includes_deep_core_band(city):
+    grid = datasets.load_city_dem(city.name)
+    centre = tuple(datasets.city_meta(city.name)["center"])
+    result = flood.run(grid, *centre, level_m=15.0, mode="rise")
+    assert not result["dry"]
+    classes = {
+        f["properties"]["class"] for f in result["flooded"]["features"]
+    }
+    assert "flood" in classes
+    # the bowl keeps a deep (>1 m) core for an aggressive rise
+    assert "flood-deep" in classes
+    assert result["stats"]["max_depth_m"] > 1.0
+    assert result["stats"]["mean_depth_m"] > 0.0
+
+
+def test_quake_radii_monotonic_by_severity(city):
+    grid = datasets.load_city_dem(city.name)
+    centre = tuple(datasets.city_meta(city.name)["center"])
+    result = earthquake.run(grid, centre[0], centre[1], 7.0, 10.0)
+    radii = [result["radii_km"][b] for b in earthquake.BANDS]
+    assert radii[0] < radii[-1]
+    assert result["radii_km"]["high"] > 0.0
+
+
+def decode_png_rgb(data: bytes) -> tuple[int, int, tuple[int, int, int]]:
+    """Unpack the minimal PNG writer output: (w, h, mode)."""
+    assert data[:8] == b"\x89PNG\r\n\x1a\n"
+    pos = 8
+    idat = bytearray()
+    w = h = mode = -1
+    while pos < len(data):
+        (length,) = struct.unpack(">I", data[pos : pos + 4])
+        tag = data[pos + 4 : pos + 8]
+        chunk = data[pos + 8 : pos + 8 + length]
+        if tag == b"IHDR":
+            w, h, _, mode, _, _, _ = struct.unpack(">IIBBBBB", chunk)
+        elif tag == b"IDAT":
+            idat.extend(chunk)
+        pos += 12 + length
+    rgb = np.frombuffer(zlib.decompress(bytes(idat)), dtype=np.uint8).reshape(
+        h, 1 + w * 3
+    )[:, 1:]
+    return w, h, (mode, rgb)
+
+
+def terrain_decode(elev_m: float) -> np.ndarray:
+    v = max(0.0, min(65535.0, elev_m + 32768.0))
+    r = int(v) >> 8 & 0xFF
+    g = int(v) & 0xFF
+    b = int((v - int(v)) * 256) & 0xFF
+    return np.array([r, g, b], dtype=np.uint8)
+
+
+def test_terrain_tile_roundtrips_terrarium(city):
+    grid = datasets.load_city_dem(city.name)
+    centre = tuple(datasets.city_meta(city.name)["center"])
+    z = 9
+    n = 2**z
+    x = int((centre[0] + 180.0) / 360.0 * n)
+    m = (1.0 - np.log(np.tan(np.deg2rad(centre[1])) + 1.0 / np.cos(np.deg2rad(centre[1]))) / np.pi) / 2.0
+    y = int(m * n)
+    data = terrain_tiles.tile(city.name, z, x, y)
+    assert data is not None
+    w, h, (mode, rgb) = decode_png_rgb(data)
+    assert (mode, w, h) == (2, 256, 256)
+    # decode the tile-centre pixel and compare with the DEM at that point
+    cx = 360.0 * ((x + 0.5) / n) - 180.0
+    cy = np.degrees(np.arctan(np.sinh(np.pi * (1 - 2 * (y + 0.5) / n))))
+    r, c = grid.cell(cx, cy)
+    expected = float(grid.elev[r, c])
+    pix = 128 * 3
+    got = (
+        float(rgb[128, pix]) * 256.0
+        + float(rgb[128, pix + 1])
+        + float(rgb[128, pix + 2]) / 256.0
+        - 32768.0
+    )
+    assert abs(got - expected) < 60.0
+    # a tile far outside the DEM extent must return None (no coverage)
+    assert terrain_tiles.tile(city.name, z, 0, 0) is None
+    assert terrain_tiles.tile(city.name, 4, 0, 0) is None  # below MIN_ZOOM

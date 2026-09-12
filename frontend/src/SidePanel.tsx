@@ -17,9 +17,11 @@ function LayerToggles() {
   const showRoads = useStore((s) => s.showRoads);
   const showBuildings = useStore((s) => s.showBuildings);
   const showFacilities = useStore((s) => s.showFacilities);
+  const terrain3d = useStore((s) => s.terrain3d);
   const setShowRoads = useStore((s) => s.setShowRoads);
   const setShowBuildings = useStore((s) => s.setShowBuildings);
   const setShowFacilities = useStore((s) => s.setShowFacilities);
+  const setTerrain3d = useStore((s) => s.setTerrain3d);
   return (
     <div>
       <div className="pixel-label" style={{ marginBottom: 6 }}>
@@ -31,6 +33,7 @@ function LayerToggles() {
             ["roads", showRoads, setShowRoads],
             ["buildings", showBuildings, setShowBuildings],
             ["facilities", showFacilities, setShowFacilities],
+            ["3D terrain", terrain3d, setTerrain3d],
           ] as [string, boolean, (v: boolean) => void][]
         ).map(([label, on, setOn]) => (
           <label key={label} style={{ display: "flex", gap: 6, alignItems: "center", cursor: "pointer" }}>
@@ -251,6 +254,7 @@ export default function SidePanel() {
   const setShowSuitability = useStore((s) => s.setShowSuitability);
   const { load } = useSuitability();
   const pickingOrigin = useStore((s) => s.pickingOrigin);
+  const hazard = useStore((s) => s.hazard);
 
   useEffect(() => {
     void load();
@@ -268,6 +272,38 @@ export default function SidePanel() {
             <HazardControls />
             <div className="divider" />
             <LayerToggles />
+            <div className="divider" />
+            <div className="pixel-label" style={{ marginBottom: 6 }}>
+              Map legend
+            </div>
+            {hazard === "flood" ? (
+              <>
+                <div className="legend-row">
+                  <span className="swatch" style={{ background: "#43C7D8" }} /> estimated water (shallow)
+                </div>
+                <div className="legend-row">
+                  <span className="swatch" style={{ background: "#1E7A99" }} /> deeper modelled core (≥ 1 m)
+                </div>
+                <div className="legend-row">
+                  <span className="swatch" style={{ background: "#9BE8F2" }} /> shoreline
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="legend-row">
+                  <span className="swatch" style={{ background: "#E34B4B" }} /> high relative intensity
+                </div>
+                <div className="legend-row">
+                  <span className="swatch" style={{ background: "#E59B45" }} /> medium-high
+                </div>
+                <div className="legend-row">
+                  <span className="swatch" style={{ background: "#E6C66A" }} /> medium
+                </div>
+                <div className="legend-row">
+                  <span className="swatch" style={{ background: "#159A9C" }} /> low
+                </div>
+              </>
+            )}
           </div>
         </section>
       ) : (

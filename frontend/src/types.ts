@@ -60,6 +60,9 @@ export interface FloodStats {
   water_surface_m: number;
   area_km2: number;
   percent_of_cells: number;
+  max_depth_m?: number;
+  mean_depth_m?: number;
+  deep_area_km2?: number;
 }
 
 export interface ExposedAsset {
@@ -95,6 +98,7 @@ export interface QuakeResult {
   zones: FeatureCollection;
   bands: string[];
   area_km2: number;
+  radii_km?: Record<string, number>;
   exposure: ExposureReport;
 }
 

@@ -2,6 +2,8 @@ import { useMemo, useState } from "react";
 import MapView from "./MapView";
 import SidePanel from "./SidePanel";
 import Topbar from "./Topbar";
+import { bootstrapCities } from "./bootstrap";
+import { api } from "./api";
 import { useStore } from "./store";
 
 function FacilityChip() {
@@ -57,6 +59,57 @@ function MapHint() {
   return <div className="map-hint">{text}</div>;
 }
 
+function BootScreen() {
+  const bootState = useStore((s) => s.bootState);
+  const cities = useStore((s) => s.cities);
+
+  return (
+    <div className="boot-screen">
+      <div className="pixel-panel boot-card">
+        <div>
+          <div className="logo">
+            TERRA<span className="dot">S</span>IM
+          </div>
+          {bootState === "ready" && cities.length === 0 ? (
+            <>
+              <div className="tagline" style={{ marginTop: 10 }}>
+                no demo areas on the server at {api.base}
+              </div>
+              <div className="mini-note">
+                Build bundles with <code>scripts/fetch_data.py --all</code>, then retry.
+              </div>
+              <button className="pixel-btn primary" style={{ marginTop: 14 }} onClick={() => void bootstrapCities()}>
+                Retry
+              </button>
+            </>
+          ) : bootState === "error" ? (
+            <>
+              <div className="tagline" style={{ marginTop: 10 }}>
+                can't reach the sim engine at {api.base}
+              </div>
+              <div className="mini-note">
+                Start it with <code>uv run uvicorn app.main:app --port 8000</code> in <code>backend/</code>.
+              </div>
+              <button className="pixel-btn primary" style={{ marginTop: 14 }} onClick={() => void bootstrapCities()}>
+                Retry
+              </button>
+            </>
+          ) : (
+            <>
+              <div className="tagline" style={{ marginTop: 10 }}>
+                connecting to the sim engine at {api.base}…
+              </div>
+              <div className="pixel-bar">
+                <div style={{ width: "70%" }} />
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [mapReady, setMapReady] = useState(false);
   const city = useStore((s) => s.city);
@@ -70,23 +123,7 @@ export default function App() {
       <Topbar />
       <div className="map-frame">
         <MapView onReady={() => setMapReady(true)} />
-        {booting && (
-          <div className="boot-screen">
-            <div className="pixel-panel boot-card">
-              <div>
-                <div className="logo">
-                  TERRA<span className="dot">S</span>IM
-                </div>
-                <div className="tagline" style={{ marginTop: 10 }}>
-                  loading demo areas…
-                </div>
-                <div className="pixel-bar">
-                  <div style={{ width: running ? "90%" : "60%" }} />
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
+        {booting && <BootScreen />}
         {!booting && <MapHint />}
         <SidePanel />
         <FacilityChip />
@@ -94,7 +131,7 @@ export default function App() {
       </div>
       {city && (
         <footer className="tagline" style={{ textAlign: "center", padding: "6px 0 10px" }}>
-          {city.name} · estimated scenario layers, not forecasts · data © OpenStreetMap contributors
+          {city.name} · estimated scenario layers, not forecasts · terrain SRTM-derived · data © OpenStreetMap contributors
         </footer>
       )}
     </div>

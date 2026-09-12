@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 from shapely.geometry import box, mapping
 from shapely.ops import unary_union
+
+_NEIGH4 = ((-1, 0), (1, 0), (0, -1), (0, 1))
 
 # Earth metrics
 KM_PER_DEG_LAT = 111.32
@@ -104,34 +107,132 @@ def downsample_mask(mask: np.ndarray, max_cells: int = 96) -> tuple[np.ndarray, 
     return coarse, factor
 
 
+def _label_components(fill: np.ndarray) -> tuple[np.ndarray, int]:
+    """Label 4-connected components of a boolean mask (row-major BFS)."""
+    h, w = fill.shape
+    labels = np.zeros((h, w), dtype=np.int32)
+    seen = np.zeros((h, w), dtype=bool)
+    label = 0
+    queue: deque[tuple[int, int]] = deque()
+    for r0 in range(h):
+        for c0 in range(w):
+            if not fill[r0, c0] or seen[r0, c0]:
+                continue
+            label += 1
+            seen[r0, c0] = True
+            labels[r0, c0] = label
+            queue.append((r0, c0))
+            while queue:
+                r, c = queue.popleft()
+                for dr, dc in _NEIGH4:
+                    nr, nc = r + dr, c + dc
+                    if 0 <= nr < h and 0 <= nc < w and fill[nr, nc] and not seen[nr, nc]:
+                        seen[nr, nc] = True
+                        labels[nr, nc] = label
+                        queue.append((nr, nc))
+    return labels, label
+
+
+def clean_mask(mask: np.ndarray, min_keep: int = 4, fill_hole: int = 8) -> np.ndarray:
+    """Drop specks smaller than ``min_keep`` cells and fill small enclosed
+    holes smaller than ``fill_hole`` cells. Operates on the display mask, so
+    the remaining features are continuous rather than stippled with noise."""
+    m = np.asarray(mask, dtype=bool).copy()
+    labels, count = _label_components(m)
+    if count:
+        sizes = np.bincount(labels.ravel())
+        for lab in np.flatnonzero(sizes < min_keep):
+            m[labels == lab] = False
+    bg = ~m
+    blabels, bcount = _label_components(bg)
+    if bcount:
+        bsizes = np.bincount(blabels.ravel())
+        edge = np.concatenate(
+            (blabels[0, :], blabels[-1, :], blabels[:, 0], blabels[:, -1])
+        )
+        boundary = set(np.unique(edge).tolist())
+        for lab in np.flatnonzero(bsizes < fill_hole):
+            if int(lab) and int(lab) not in boundary:
+                m[blabels == lab] = True
+    return m
+
+
+def _strip_boxes(coarse: np.ndarray, factor: int, grid: DemGrid) -> list:
+    """Build one bounding box per contiguous horizontal run of cells.
+
+    This keeps the polygon count proportional to the number of *runs*
+    (dozens, not per-cell tens-of-thousands), so unary_union stays cheap
+    even at high display resolution.
+    """
+    boxes = []
+    for r in range(coarse.shape[0]):
+        row = np.flatnonzero(coarse[r])
+        if row.size == 0:
+            continue
+        lat1 = grid.max_lat - r * factor * grid.res_lat
+        lat0 = lat1 - factor * grid.res_lat
+        start = int(row[0])
+        prev = start
+        for c in row[1:].tolist():
+            if c == prev + 1:
+                prev = c
+                continue
+            boxes.append(
+                box(
+                    grid.min_lng + start * factor * grid.res_lng,
+                    lat0,
+                    grid.min_lng + (prev + 1) * factor * grid.res_lng,
+                    lat1,
+                )
+            )
+            start = prev = c
+        boxes.append(
+            box(
+                grid.min_lng + start * factor * grid.res_lng,
+                lat0,
+                grid.min_lng + (prev + 1) * factor * grid.res_lng,
+                lat1,
+            )
+        )
+    return boxes
+
+
 def mask_to_polygons(
     mask: np.ndarray,
     grid: DemGrid,
-    max_cells: int = 96,
-    simplify: bool = True,
+    max_cells: int = 512,
+    clean: bool = True,
+    min_keep: int = 4,
+    fill_hole: int = 8,
+    simplify_tol: float | None = None,
 ) -> list[dict]:
     """Convert a boolean raster mask into a list of GeoJSON polygons.
 
-    The mask is downsampled for display, neighbouring cells are merged with
-    a unary union, and small holes/slivers are removed via simplification.
+    The mask is downsampled for display, cleaned of specks/holes, merged into
+    polygons (one box per contiguous cell run before the union), then gently
+    simplified so water/intensity zones read as continuous areas rather than
+    stitched rectangles or slivers.
     """
     coarse, factor = downsample_mask(mask, max_cells)
-    cells = np.argwhere(coarse)
-    polys = [
-        box(*grid.cell_bbox(r * factor, c * factor))
-        for r, c in cells
-    ]
-    merged = unary_union(polys)
+    if clean:
+        coarse = clean_mask(coarse, min_keep=min_keep, fill_hole=fill_hole)
+    if not coarse.any():
+        return []
+    boxes = _strip_boxes(coarse, factor, grid)
+    merged = unary_union(boxes)
     if merged.is_empty:
         return []
-    if simplify:
-        tol = max(grid.res_lng, grid.res_lat) * factor * 0.5
-        merged = merged.simplify(tol, preserve_topology=True)
-    shapes = merged.geoms if merged.geom_type in ("MultiPolygon", "GeometryCollection") else [merged]
+    if simplify_tol is None:
+        simplify_tol = max(grid.res_lng, grid.res_lat) * factor * 0.5
+    merged = merged.simplify(simplify_tol, preserve_topology=True)
+    shapes = (
+        merged.geoms
+        if merged.geom_type in ("MultiPolygon", "GeometryCollection")
+        else [merged]
+    )
     features = []
     for shape in shapes:
         if shape.is_empty:
             continue
-        # skip below one coarse cell of area to avoid specks
         features.append(mapping(shape))
     return features

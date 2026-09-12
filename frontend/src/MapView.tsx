@@ -1,6 +1,12 @@
 import * as maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
+import maplibreWorkerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url";
 import { useEffect, useRef, useState } from "react";
+
+// maplibre v6 resolves its worker URL from import.meta.url, which a bundler
+// rewrites so the sibling worker file is never served. Point it at the worker
+// Vite emits/`?worker&url`-bundles before any Map is constructed.
+maplibregl.setWorkerUrl(maplibreWorkerUrl);
 import { api } from "./api";
 import { atlasDefinitions, iconForType } from "./pixelIcons";
 import { useStore } from "./store";
@@ -12,10 +18,13 @@ const LAYER_ORDER = [
   "ts-sus-yellow",
   "ts-sus-green",
   "ts-overlay",
+  "ts-flood-shore",
   "ts-infra-buildings",
   "ts-infra-roads",
   "ts-infra-facilities",
+  "ts-exposed-dots",
   "ts-plan-assets",
+  "ts-pulse",
   "ts-annos",
 ];
 
@@ -28,10 +37,60 @@ function fc(features: GeoFeature[]): FeatureCollection {
   return { type: "FeatureCollection", features };
 }
 
+function webgl2Available(): boolean {
+  try {
+    return !!document.createElement("canvas").getContext("webgl2");
+  } catch {
+    return false;
+  }
+}
+
+function applyTerrain(
+  map: maplibregl.Map,
+  cityId: string,
+  bounds: [number, number, number, number],
+  enabled: boolean,
+) {
+  const existing = map.getSource("dem") as
+    | maplibregl.RasterDEMTileSource
+    | undefined;
+  const tiles = [api.terrainUrl(cityId)];
+  if (existing) {
+    existing.setTiles(tiles);
+  } else {
+    map.addSource("dem", {
+      type: "raster-dem",
+      tiles,
+      tileSize: 256,
+      maxzoom: 15,
+      bounds,
+      encoding: "terrarium",
+    });
+  }
+  if (enabled) {
+    map.setTerrain({ source: "dem", exaggeration: 1.3 });
+    map.setSky({
+      "sky-color": "#0f1b3a",
+      "horizon-color": "#8fb4c4",
+      "fog-color": "#dde5e6",
+      "fog-ground-blend": 0.55,
+    });
+  } else {
+    map.setTerrain(null);
+    map.setSky({
+      "atmosphere-blend": 0,
+      "sky-color": "#dcebf5",
+      "horizon-color": "#ffffff",
+      "fog-color": "#ffffff",
+    });
+  }
+}
+
 export default function MapView({ onReady }: { onReady?: () => void }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const initializedCity = useRef<string | null>(null);
+  const webgl2 = useRef<boolean>(webgl2Available());
   // maplibre v6 only allows style mutations after the style has loaded.
   const [mapLoaded, setMapLoaded] = useState(false);
 
@@ -48,6 +107,12 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
   const showBuildings = useStore((s) => s.showBuildings);
   const showFacilities = useStore((s) => s.showFacilities);
   const showSuitability = useStore((s) => s.showSuitability);
+  const terrain3d = useStore((s) => s.terrain3d);
+  // OSM ids -> facility features, for tinting exposed assets after a run.
+  const facilitiesRef = useRef<Map<string, GeoFeature>>(new Map());
+  // Brush used to draw the quake pulse halo; kept in a ref so the rAF loop
+  // doesn't re-subscribe on every pixel.
+  const pulseRef = useRef<{ radius: number; color: string } | null>(null);
 
   const setSource = useStore((s) => s.setSource);
   const setFacilityDetail = useStore((s) => s.setFacilityDetail);
@@ -60,6 +125,14 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
   // --- create map once -----------------------------------------------------
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
+    if (!webgl2.current) {
+      // v6 is WebGL2-only; be honest instead of a silent blank canvas.
+      onReady?.();
+      setError(
+        "Map can't start: WebGL2 is unavailable in this browser. Enable hardware acceleration, or use a recent Chrome/Edge/Firefox.",
+      );
+      return;
+    }
     const map = new maplibregl.Map({
       container: containerRef.current,
       style: {
@@ -92,6 +165,21 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
       "bottom-right",
     );
 
+    // Surface fatal map errors instead of a silent blank canvas. Tile-level
+    // failures (e.g. a slow tile server) are warnings, not toasts.
+    map.on("error", (e) => {
+      const ev = e as unknown as {
+        error?: { message?: string };
+        message?: unknown;
+      };
+      const msg = ev.error?.message ?? (typeof ev.message === "string" ? ev.message : String(e));
+      if (!map.isStyleLoaded()) {
+        setError(`Map failed to start: ${msg}`);
+      } else {
+        console.warn("[terrasim map]", msg);
+      }
+    });
+
     // Style mutations (images/sources/layers) must wait for the style to load —
     // maplibre throws "Style is not done loading" otherwise.
     map.once("load", () => {
@@ -120,6 +208,9 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
       map.addSource("ts-infra-facilities", QUIET_SRC as never);
       map.addSource("ts-plan-assets", QUIET_SRC as never);
       map.addSource("ts-annos", QUIET_SRC as never);
+      map.addSource("ts-flood-shore", QUIET_SRC as never);
+      map.addSource("ts-exposed", QUIET_SRC as never);
+      map.addSource("ts-pulse", QUIET_SRC as never);
 
       map.addLayer({
         id: "ts-sus-green",
@@ -160,9 +251,22 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
             "#159A9C",
             "flood",
             "#43C7D8",
+            "flood-deep",
+            "#1E7A99",
             "#43C7D8",
           ],
-          "fill-opacity": ["match", ["get", "class"], "flood", 0.55, 0.34],
+          "fill-opacity": ["match", ["get", "class"], "flood-deep", 0.7, "flood", 0.55, 0.34],
+        },
+        layout: { visibility: "none" },
+      });
+      map.addLayer({
+        id: "ts-flood-shore",
+        type: "line",
+        source: "ts-flood-shore",
+        paint: {
+          "line-color": "#9BE8F2",
+          "line-width": 2.2,
+          "line-opacity": 0.95,
         },
         layout: { visibility: "none" },
       });
@@ -205,6 +309,46 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
           "icon-size": ["case", ["get", "selected"], 1.5, 0.9],
           "icon-allow-overlap": true,
         },
+      });
+      map.addLayer({
+        id: "ts-exposed-dots",
+        type: "circle",
+        source: "ts-exposed",
+        paint: {
+          "circle-radius": 3.2,
+          "circle-color": [
+            "match",
+            ["get", "class"],
+            "high",
+            "#E34B4B",
+            "medium_high",
+            "#E59B45",
+            "medium",
+            "#E6C66A",
+            "low",
+            "#159A9C",
+            "flood",
+            "#43C7D8",
+            "#FFFFFF",
+          ],
+          "circle-stroke-color": "#221F16",
+          "circle-stroke-width": 1.2,
+          "circle-opacity": 0.9,
+        },
+        layout: { visibility: "none" },
+      });
+      map.addLayer({
+        id: "ts-pulse",
+        type: "circle",
+        source: "ts-pulse",
+        paint: {
+          "circle-radius": 4,
+          "circle-color": "#FFD9A8",
+          "circle-stroke-color": "#E34B4B",
+          "circle-stroke-width": 1.6,
+          "circle-opacity": 0.9,
+        },
+        layout: { visibility: "none" },
       });
       map.addLayer({
         id: "ts-annos",
@@ -291,6 +435,8 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
       { padding: 60, duration: 600 },
     );
 
+    applyTerrain(map, city.id, city.bounds, useStore.getState().terrain3d);
+
     void Promise.all([
       api.layer(city.id, "buildings").then((data) => {
         const source = map.getSource(
@@ -312,6 +458,9 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
             icon: iconForType((f.properties.type as string) ?? ""),
           },
         }));
+        facilitiesRef.current = new Map(
+          features.map((f) => [String(f.properties.id ?? ""), f]),
+        );
         const source = map.getSource(
           "ts-infra-facilities",
         ) as maplibregl.GeoJSONSource;
@@ -330,6 +479,13 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
     setVis("ts-infra-roads", showRoads && mode === "existing");
     setVis("ts-infra-facilities", showFacilities && mode === "existing");
   }, [showRoads, showBuildings, showFacilities, mode, mapLoaded]);
+
+  // --- terrain elevation ------------------------------------------------------
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapLoaded || !city) return;
+    applyTerrain(map, city.id, city.bounds, terrain3d);
+  }, [terrain3d, city, mapLoaded]);
 
   // --- suitability overlay ---------------------------------------------------
   useEffect(() => {
@@ -372,16 +528,93 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !mapLoaded) return;
-    const source = map.getSource("ts-overlay") as
+    const overlay = map.getSource("ts-overlay") as
       maplibregl.GeoJSONSource | undefined;
+    const shore = map.getSource("ts-flood-shore") as
+      maplibregl.GeoJSONSource | undefined;
+    const exposed = map.getSource("ts-exposed") as
+      maplibregl.GeoJSONSource | undefined;
+    const pulse = map.getSource("ts-pulse") as
+      maplibregl.GeoJSONSource | undefined;
+
     let data: FeatureCollection = fc([]);
-    if (result?.kind === "flood" && !result.dry) data = result.overlay;
-    if (result?.kind === "earthquake") data = result.zones;
-    source?.setData(data);
+    let shoreData: FeatureCollection = fc([]);
+    let exposedData: FeatureCollection = fc([]);
+    let pulseData: FeatureCollection = fc([]);
+
+    if (result?.kind === "flood" && !result.dry) {
+      data = result.overlay;
+      shoreData = fc(
+        result.overlay.features.filter(
+          (f) => f.properties.class === "flood",
+        ),
+      );
+      const exposed = result.exposure?.affected ?? [];
+      exposedData = fc(
+        exposed
+          .map((e): GeoFeature | null => {
+            const g = facilitiesRef.current.get(String(e.id ?? ""));
+            if (!g) return null;
+            return {
+              ...g,
+              properties: { ...g.properties, class: e.band ?? "flood" },
+            } as GeoFeature;
+          })
+          .filter((f): f is GeoFeature => Boolean(f)),
+      );
+    }
+
+    if (result?.kind === "earthquake") {
+      data = result.zones;
+      const exposed = result.exposure?.exposed ?? [];
+      exposedData = fc(
+        exposed
+          .map((e): GeoFeature | null => {
+            const g = facilitiesRef.current.get(String(e.id ?? ""));
+            if (!g) return null;
+            return {
+              ...g,
+              properties: { ...g.properties, class: e.band ?? "medium" },
+            } as GeoFeature;
+          })
+          .filter((f): f is GeoFeature => Boolean(f)),
+      );
+      const s = useStore.getState().source;
+      if (s) {
+        pulseRef.current = { radius: 4, color: "#E34B4B" };
+        pulseData = fc([
+          {
+            type: "Feature",
+            properties: { class: "high" },
+            geometry: { type: "Point", coordinates: [s.lng, s.lat] },
+          },
+        ]);
+      }
+    }
+
+    overlay?.setData(data);
     map.setLayoutProperty(
       "ts-overlay",
       "visibility",
       data.features.length ? "visible" : "none",
+    );
+    shore?.setData(shoreData);
+    map.setLayoutProperty(
+      "ts-flood-shore",
+      "visibility",
+      shoreData.features.length ? "visible" : "none",
+    );
+    exposed?.setData(exposedData);
+    map.setLayoutProperty(
+      "ts-exposed-dots",
+      "visibility",
+      exposedData.features.length ? "visible" : "none",
+    );
+    pulse?.setData(pulseData);
+    map.setLayoutProperty(
+      "ts-pulse",
+      "visibility",
+      pulseData.features.length ? "visible" : "none",
     );
   }, [result, mapLoaded]);
 
@@ -404,6 +637,34 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
     ];
     annoSource.setData(fc(features));
   }, [source, hazard, mode, mapLoaded]);
+
+  // --- quake epicenter pulse (rAF halo around the epicenter marker) ----------
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapLoaded) return;
+    if (result?.kind !== "earthquake") {
+      pulseRef.current = null;
+      return;
+    }
+    let raf = 0;
+    const base = pulseRef.current?.radius ?? 4;
+    map.setPaintProperty(
+      "ts-pulse",
+      "circle-stroke-color",
+      pulseRef.current?.color ?? "#E34B4B",
+    );
+    const t0 = performance.now();
+    const step = () => {
+      raf = requestAnimationFrame(step);
+      const t = (performance.now() - t0) / 1000;
+      const r = base + (1 - Math.cos(t * 0.9)) * 24;
+      const alpha = 0.85 * Math.max(0, 1 - ((r - base) / 24) * 0.55);
+      map.setPaintProperty("ts-pulse", "circle-radius", r);
+      map.setPaintProperty("ts-pulse", "circle-opacity", alpha);
+    };
+    raf = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(raf);
+  }, [result, source, mapLoaded]);
 
   // --- planned assets ---------------------------------------------------------
   useEffect(() => {
@@ -452,6 +713,18 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
       map.getCanvas().style.cursor = "";
     }
   }, [pendingAsset, mapLoaded]);
+
+  if (!webgl2.current) {
+    return (
+      <div className="map-canvas">
+        <div className="map-unsupported">
+          This browser can't render the map.
+          <br />
+          Enable hardware acceleration or use a recent Chrome / Edge / Firefox.
+        </div>
+      </div>
+    );
+  }
 
   return <div ref={containerRef} className="map-canvas" />;
 }
