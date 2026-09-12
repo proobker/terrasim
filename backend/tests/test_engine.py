@@ -10,6 +10,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from shapely.geometry import shape
 
 import app.datasets as datasets
 from app.engine import earthquake, exposure, flood, suitability, terrain_tiles
@@ -404,6 +405,33 @@ def test_quake_radii_monotonic_by_severity(city):
     radii = [result["radii_km"][b] for b in earthquake.BANDS]
     assert radii[0] < radii[-1]
     assert result["radii_km"]["high"] > 0.0
+
+
+def test_quake_region_clip_limits_zones_to_basin(city):
+    grid = datasets.load_city_dem(city.name)
+    centre = tuple(datasets.city_meta(city.name)["center"])
+    region = grid.region_mask(20.0)  # inner half of the bowl only
+    full = earthquake.quake_zones(grid, centre[0], centre[1], 7.0, 10.0)
+    clipped = earthquake.quake_zones(grid, centre[0], centre[1], 7.0, 10.0, region=region)
+    full_area = sum(
+        shape(f["geometry"]).area for band in full.values() for f in band["features"]
+    )
+    clipped_area = sum(
+        shape(f["geometry"]).area for band in clipped.values() for f in band["features"]
+    )
+    assert full_area > 0.0
+    assert 0.0 < clipped_area < full_area
+
+
+def test_flood_region_clip_trims_outer_extent(city):
+    grid = datasets.load_city_dem(city.name)
+    centre = tuple(datasets.city_meta(city.name)["center"])
+    region = grid.region_mask(11.0)  # small pool around the bowl floor
+    full = flood.run(grid, *centre, level_m=25.0, mode="rise")
+    clipped = flood.run(grid, *centre, level_m=25.0, mode="rise", region=region)
+    assert not clipped["dry"]
+    n_clip = clipped["stats"]["cells_flooded"]
+    assert 0 < n_clip < full["stats"]["cells_flooded"]
 
 
 def decode_png_rgb(data: bytes) -> tuple[int, int, tuple[int, int, int]]:

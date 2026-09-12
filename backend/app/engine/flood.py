@@ -429,6 +429,8 @@ def flood_mask(
     source_lat: float,
     level_m: float,
     mode: str = "rise",
+    *,
+    region: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray | None]:
     """Compute the flooded-cell mask from a point source.
 
@@ -436,7 +438,8 @@ def flood_mask(
     In ``rise`` mode the point source releases a conserved volume equal to
     the rise above the source cell's terrain at a one-cell inlet; in
     ``absolute`` mode the volume is the water below ``level_m`` above sea
-    level.
+    level. ``region`` optionally clips the reported mask to a geographic
+    basin.
     """
     elev = grid.elev
     r0, c0 = grid.cell(source_lng, source_lat)
@@ -447,6 +450,8 @@ def flood_mask(
     if plan is None:
         return np.zeros_like(elev, dtype=bool), None
     mask, surface = _flux_simulate(elev, flow, plan)
+    if region is not None:
+        mask = mask & region
     if not mask.any():
         return mask, None
     return mask, surface
@@ -458,6 +463,8 @@ def river_flood_mask(
     level_m: float,
     mode: str = "rise",
     water_features: list[dict] | None = None,
+    *,
+    region: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray | None]:
     """Compute the flooded mask seeded along a river channel.
 
@@ -476,6 +483,8 @@ def river_flood_mask(
     if plan is None:
         return np.zeros_like(elev, dtype=bool), None
     mask, surface = _flux_simulate(elev, flow, plan)
+    if region is not None:
+        mask = mask & region
     if not mask.any():
         return mask, None
     return mask, surface
@@ -571,8 +580,12 @@ def _result(
     mask: np.ndarray,
     surface_raster: np.ndarray | None = None,
     plan: dict | None = None,
+    *,
+    region: np.ndarray | None = None,
 ) -> dict:
     """Assemble the flood result dict (also carries the raw mask for reuse)."""
+    if region is not None:
+        mask = mask & region
     if mask.any() and surface_raster is not None and plan is not None:
         surface = float(surface_raster[mask].max())
         layers = flood_to_featurecollections(grid, mask, surface_raster)
@@ -608,7 +621,15 @@ def _result(
     }
 
 
-def run(grid: DemGrid, source_lng: float, source_lat: float, level_m: float, mode: str) -> dict:
+def run(
+    grid: DemGrid,
+    source_lng: float,
+    source_lat: float,
+    level_m: float,
+    mode: str,
+    *,
+    region: np.ndarray | None = None,
+) -> dict:
     elev = grid.elev
     r0, c0 = grid.cell(source_lng, source_lat)
     seeds = np.zeros_like(elev, dtype=bool)
@@ -616,9 +637,9 @@ def run(grid: DemGrid, source_lng: float, source_lat: float, level_m: float, mod
     flow = _d8_flow_dir(elev)
     plan = _inflow_plan(grid, elev, flow, seeds, None, level_m, mode, use_catchment=False)
     if plan is None:
-        return _result(grid, np.zeros_like(elev, dtype=bool), None, None)
+        return _result(grid, np.zeros_like(elev, dtype=bool), None, None, region=region)
     mask, surface = _flux_simulate(elev, flow, plan)
-    return _result(grid, mask, surface, plan)
+    return _result(grid, mask, surface, plan, region=region)
 
 
 def run_river(
@@ -627,15 +648,17 @@ def run_river(
     level_m: float,
     mode: str = "rise",
     water_features: list[dict] | None = None,
+    *,
+    region: np.ndarray | None = None,
 ) -> dict:
     elev = grid.elev
     seeds = _channel_seeds(grid, coords)
     if not seeds.any():
-        return _result(grid, np.zeros_like(elev, dtype=bool), None, None)
+        return _result(grid, np.zeros_like(elev, dtype=bool), None, None, region=region)
     all_water = _all_water_seeds(grid, water_features)
     flow = _d8_flow_dir(elev)
     plan = _inflow_plan(grid, elev, flow, seeds, all_water, level_m, mode)
     if plan is None:
-        return _result(grid, np.zeros_like(elev, dtype=bool), None, None)
+        return _result(grid, np.zeros_like(elev, dtype=bool), None, None, region=region)
     mask, surface = _flux_simulate(elev, flow, plan)
-    return _result(grid, mask, surface, plan)
+    return _result(grid, mask, surface, plan, region=region)

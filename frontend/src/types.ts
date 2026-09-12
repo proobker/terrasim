@@ -7,12 +7,14 @@ export interface CityInfo {
   status: string;
   center: [number, number];
   bounds: [number, number, number, number];
+  hazard_bounds?: [number, number, number, number];
+  valley_cap_m?: number;
   zoom: number;
   grid: { ncols: number; nrows: number; res_deg: number };
   attribution: string[];
 }
 
-export type LayerKind = "buildings" | "roads" | "facilities" | "water";
+export type LayerKind = "buildings" | "roads" | "facilities" | "water" | "rim";
 
 export interface RiverSummary {
   id: string;

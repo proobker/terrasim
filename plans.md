@@ -2100,6 +2100,17 @@ Toggle infrastructure.
 > "Now we can see which roads and critical facilities fall inside the
 > estimated higher-exposure area."
 
+Toggle 3D blocks / tilt. (Map opens pitched over the valley basin; the
+stylised toy blocks pop with the terrain.)
+
+> "Every building is shown as an estimated-height block — when the hazard
+> hits, the exposed blocks tint to the band colours."
+
+Pan the overlay (valley-wide, not the old box).
+
+> "The simulation covers the whole valley floor, not just a square around
+> the map."
+
 ------------------------------------------------------------------------
 
 ## New city

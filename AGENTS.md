@@ -27,10 +27,13 @@ frontend/
   src/ExposurePanel.tsx  Result stats + per-asset verdicts (flood reads `affected`,
                      quake reads `exposed`).
   src/useSimulate.ts runHazard/planAssets/useSuitability API hooks.
+  src/buildings3d.ts synthetic 3D blocks (estimated heights, band tinting) for the toy city.
   src/pixelIcons.ts  canvas-generated pixel sprites; atlasDefinitions() + previewCanvas().
   src/index.css      full pixel/FireRed design system (palette in plans.md §39).
 scripts/fetch_data.py  Overpass (OSM) + Terrarium (DEM) fetch pipeline → data/bundles.
-data/bundles/<city>/ city.json geometry, dem.meta.json + dem.npz, buildings/roads/facilities.geojson
+data/bundles/<city>/ city.json geometry (+ hazard_bounds/valley_cap_m), dem.meta.json + dem.npz,
+                     buildings/roads/facilities.geojson, rim.geojson (only when a genuine
+                     valley ring exists for the city)
 ```
 
 ## Commands (definition of done)
@@ -47,10 +50,14 @@ data/bundles/<city>/ city.json geometry, dem.meta.json + dem.npz, buildings/road
 - Mirrors throttle bursts; `overpass-api.de` is unreachable from this machine. Fetch strategy is a **single tolerant pass**: mirrors tried once (shuffled), 1.5s backoff, `OVERPASS_TIMEOUT=40`; a chunk that fails is skipped by its caller rather than retried hot. Keep it tolerant or builds hang for minutes.
 - Buildings are fetched with `out center` — centroid **Point** features per chunk. `out geom` under load returns degenerate 2-point ways that are filtered out → "buildings: 0".
 - Roads use `to_features(..., keep_lines=True)`: always LineString, never closed as Polygon. Polygons are wrapped `[ring]` per GeoJSON. 3-point extras are dropped as ambiguous. Non-Zero passes finalize.
+- Buildings now carry OSM `id` (+ `height`, `building:levels` when tagged) so the 3D blocks can be tinted per exposed asset.
+- `rim.geojson` is written only when the lowland below `valley_cap_m` forms a genuine ring. Open basins (the DEM box connecting to an adjacent plain, e.g. Kathmandu's NW edge) are rejected by the edge-hugging guard — no file, and the frontend hides the "Valley rim" toggle rather than dream up a fake line.
+- `city.json` may carry `hazard_bounds` (wider DEM/sim theatre) + `valley_cap_m`; the frontend fits the map to `hazard_bounds ?? bounds` and the engine clips overlays to `elev < valley_cap_m`.
 
 ## Conventions (load-bearing)
 
 - **Honesty framing**: every UI string and API field says *estimated / hypothetical / scenario-based / relative / candidate / exposure* — never *predicts / guaranteed / will collapse*. Flood on dry ground reports `dry: true` and the UI says nothing floods. This is not decoration; plans.md §30 and §10.
+- **Blocks are illustration, not survey**: 3D building heights/footprints are stylised estimates (OSM tags when present, type defaults otherwise); hover clearly reads "~N m est.". Band colours on blocks mark *scenario exposure*, never damage.
 - **Fallbacks feel wrong**: precommitted demo data means the demo works offline-ish; a failed sim or empty overlay is a bug, not an acceptable output.
 - **Vibe-check before done**: open the running app and scrutinize as a player. Stock map look, default dev styling, or inconsistent spacing fails the bar. FireRed chrome is a requirement, not a garnish.
 

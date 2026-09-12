@@ -9,6 +9,9 @@ bundles under ``data/bundles/<city_id>/``:
 - ``dem.npz``           elevation raster
 - ``buildings.geojson`` / ``roads.geojson`` / ``facilities.geojson``
 - ``water.geojson``     river/stream/canal centerlines (for flood sources)
+- ``rim.geojson``       valley-bowl outline (iso-line of the DEM at the city's
+                        ``valley_cap_m``), used to clip hazard overlays to the
+                        actual geographic basin instead of the grid rectangle
 
 Usage (from the backend directory):
 
@@ -38,6 +41,8 @@ from pathlib import Path
 
 import numpy as np
 from PIL import Image
+from shapely.geometry import box
+from shapely.ops import unary_union
 
 ROOT = Path(__file__).resolve().parents[1]
 BUNDLES = ROOT / "data" / "bundles"
@@ -69,7 +74,15 @@ CITIES = {
         "name": "Kathmandu",
         "mode": "existing",
         "status": "urban core + surrounding valley hills",
+        # Dense OSM feature fetch stays on the urban core box.
         "bounds": [85.24, 27.62, 85.44, 27.78],
+        # The valley theatre: the geomorphologic bowl used for the DEM grid,
+        # terrain tiles, hazard simulation and the default map view.
+        "hazard_bounds": [85.15, 27.54, 85.47, 27.75],
+        # Rim threshold (m asl): cells below this are "the valley". The bowl
+        # floor sits around 1,300-1,360 m; the surrounding hills rise above
+        # 1,500 m, so 1,450 m traces the rim cleanly.
+        "valley_cap_m": 1450.0,
         "zoom": 13,
     },
     "pokhara": {
@@ -785,6 +798,103 @@ def fetch_dem(bounds: list[float], z: int = 11) -> tuple[np.ndarray, dict]:
     return dem.astype(np.float32), meta
 
 
+def rim_geojson(dem: np.ndarray, meta: dict, cap_m: float | None) -> dict | None:
+    """Extract the valley-bowl outline from the DEM.
+
+    The bowl is the 4-connected lowland region below ``cap_m``. Its exterior
+    ring is the ``rim`` — the line where the valley floor meets the enclosing
+    hills — written as a simplified LineString feature. Returns None when the
+    region is empty or fills the whole grid (the rim would be the box itself,
+    which buys nothing).
+    """
+    if cap_m is None:
+        return None
+    mask = dem < cap_m
+    if not mask.any():
+        return None
+    h, w = mask.shape
+    boxes = []
+    for r in range(h):
+        row = np.flatnonzero(mask[r])
+        if row.size == 0:
+            continue
+        lat1 = meta["min_lat"] + (h - r) * meta["res_lat"]
+        lat0 = lat1 - meta["res_lat"]
+        start = int(row[0])
+        prev = start
+
+        def emit(a: int, b: int) -> None:
+            boxes.append(
+                box(
+                    meta["min_lng"] + a * meta["res_lng"],
+                    lat0,
+                    meta["min_lng"] + (b + 1) * meta["res_lng"],
+                    lat1,
+                )
+            )
+
+        for c in row[1:].tolist():
+            if c == prev + 1:
+                prev = c
+                continue
+            emit(start, prev)
+            start = prev = c
+        emit(start, prev)
+    if not boxes:
+        return None
+
+    merged = unary_union(boxes)
+    # Donut holes and watershed-spill islands are possible; the rim we want is
+    # the outline of the dominant lowland body (the valley floor itself).
+    if merged.geom_type == "Polygon":
+        body = merged
+    elif merged.geom_type == "MultiPolygon":
+        body = max(merged.geoms, key=lambda g: g.area)
+    else:
+        return None
+    ext = body.exterior
+    if ext is None or ext.length <= 0:
+        return None
+    ring = list(ext.coords)
+    grid_corners = {
+        (meta["min_lng"], meta["min_lat"]),
+        (meta["min_lng"], meta["min_lat"] + h * meta["res_lat"]),
+        (meta["min_lng"] + w * meta["res_lng"], meta["min_lat"]),
+        (meta["min_lng"] + w * meta["res_lng"], meta["min_lat"] + h * meta["res_lat"]),
+    }
+    if any(tuple(map(lambda v: round(v, 6), p)) in grid_corners for p in ring):
+        return None  # bowl fills the grid; a rectangle rim adds nothing
+
+    # An open basin (valley opening to an adjacent plain) hugs the DEM border:
+    # the ring is really the grid edge, not a valley outline. Reject it.
+    eps = max(meta["res_lng"], meta["res_lat"]) / 2
+    edge_points = sum(
+        1
+        for p in ring
+        if (
+            abs(p[0] - meta["min_lng"]) <= eps
+            or abs(p[0] - (meta["min_lng"] + w * meta["res_lng"])) <= eps
+            or abs(p[1] - meta["min_lat"]) <= eps
+            or abs(p[1] - (meta["min_lat"] + h * meta["res_lat"])) <= eps
+        )
+    )
+    if ring and edge_points / len(ring) > 0.35:
+        return None
+
+    tol = max(meta["res_lng"], meta["res_lat"]) * 4
+    coords = [list(p) for p in ext.simplify(tol).coords]
+    return {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "properties": {"class": "valley-rim", "elev_m": cap_m},
+                "geometry": {"type": "LineString", "coordinates": coords},
+            }
+        ],
+    }
+
+
 def build_city(city_id: str, force: bool = False) -> None:
     cfg = CITIES[city_id]
     out = BUNDLES / city_id
@@ -793,7 +903,13 @@ def build_city(city_id: str, force: bool = False) -> None:
     print(f"[{city_id}] fetching OSM (overpass, mirror rotation)...")
     osm = fetch_osm(cfg["bounds"])
 
-    buildings = to_features(osm["buildings"].get("elements", []), None, True)
+    buildings = to_features(
+        osm["buildings"].get("elements", []),
+        None,
+        True,
+        extra_tags=("height", "building:levels"),
+        add_id=True,
+    )
     buildings = buildings[:BUILDING_MAX]
     roads = to_features(osm["roads"].get("elements", []), "geometry", False, keep_lines=True)
     water = to_features(
@@ -820,10 +936,19 @@ def build_city(city_id: str, force: bool = False) -> None:
         )
         print(f"  {name}: {len(fc)}")
 
-    print(f"[{city_id}] fetching DEM (terrarium z=11) and resampling...")
-    dem, meta = fetch_dem(cfg["bounds"])
+    hazard_bounds = cfg.get("hazard_bounds", cfg["bounds"])
+    print(f"[{city_id}] fetching DEM (terrarium z=11) over {hazard_bounds}...")
+    dem, meta = fetch_dem(hazard_bounds)
     np.savez(out / "dem.npz", elev=dem)
     (out / "dem.meta.json").write_text(json.dumps(meta), encoding="utf-8")
+
+    cap_m = cfg.get("valley_cap_m")
+    rim = rim_geojson(dem, meta, cap_m)
+    if rim:
+        (out / "rim.geojson").write_text(json.dumps(rim), encoding="utf-8")
+        print(f"  rim: {len(rim['features'])} feature(s) at {cap_m} m")
+    else:
+        (out / "rim.geojson").unlink(missing_ok=True)
 
     city = {
         "id": city_id,
@@ -832,6 +957,7 @@ def build_city(city_id: str, force: bool = False) -> None:
         "status": cfg["status"],
         "center": [(cfg["bounds"][0] + cfg["bounds"][2]) / 2, (cfg["bounds"][1] + cfg["bounds"][3]) / 2],
         "bounds": cfg["bounds"],
+        "hazard_bounds": hazard_bounds,
         "zoom": cfg["zoom"],
         "grid": {"ncols": dem.shape[1], "nrows": dem.shape[0], "res_deg": RES_DEG},
         "attribution": [
@@ -839,6 +965,8 @@ def build_city(city_id: str, force: bool = False) -> None:
             "Elevation: Mapzen terrain tiles (Terrarium)",
         ],
     }
+    if cap_m is not None:
+        city["valley_cap_m"] = cap_m
     (out / "city.json").write_text(json.dumps(city, indent=2), encoding="utf-8")
     print(f"[{city_id}] done -> {out}")
 

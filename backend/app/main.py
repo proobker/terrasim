@@ -30,6 +30,20 @@ def _assets_for(scenario: FloodScenario | EarthquakeScenario) -> dict[str, list[
         return assets
     return datasets.load_assets(scenario.city_id)
 
+
+def _valley_region(grid, city_id: str):
+    """Boolean raster of the lowland basin, or None when the city has no cap.
+
+    Lets scenario overlays trace the real geographic region (e.g. the
+    Kathmandu valley bowl) instead of a grid rectangle.
+    """
+    try:
+        meta = datasets.city_meta(city_id)
+    except FileNotFoundError:
+        return None
+    cap = meta.get("valley_cap_m")
+    return grid.region_mask(cap) if cap is not None else None
+
 app = FastAPI(
     title="terrasim",
     version=__version__,
@@ -124,7 +138,14 @@ def simulate_flood(scenario: FloodScenario) -> dict:
                 water_features = datasets.load_layer(scenario.city_id, "water").get("features") or None
             except FileNotFoundError:
                 water_features = None
-        result = flood.run_river(grid, coords, scenario.level_m, scenario.mode, water_features)
+        result = flood.run_river(
+            grid,
+            coords,
+            scenario.level_m,
+            scenario.mode,
+            water_features,
+            region=_valley_region(grid, scenario.city_id),
+        )
     else:
         assert scenario.source is not None
         result = flood.run(
@@ -133,6 +154,7 @@ def simulate_flood(scenario: FloodScenario) -> dict:
             scenario.source.lat,
             scenario.level_m,
             scenario.mode,
+            region=_valley_region(grid, scenario.city_id),
         )
     response = {
         "kind": "flood",
@@ -160,6 +182,7 @@ def simulate_earthquake(scenario: EarthquakeScenario) -> dict:
         scenario.epicenter.lat,
         scenario.magnitude,
         scenario.depth_km,
+        region=_valley_region(grid, scenario.city_id),
     )
     hazard = {
         "kind": "earthquake",

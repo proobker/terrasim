@@ -8,8 +8,10 @@ import { useEffect, useRef, useState } from "react";
 // Vite emits/`?worker&url`-bundles before any Map is constructed.
 maplibregl.setWorkerUrl(maplibreWorkerUrl);
 import { api } from "./api";
+import { applyBands, bandsFromResult, buildAssetBlocks, buildBlockFeatures } from "./buildings3d";
 import { atlasDefinitions, iconForType } from "./pixelIcons";
 import { useStore } from "./store";
+import type { BlockFeature } from "./buildings3d";
 import type { FeatureCollection, GeoFeature } from "./types";
 
 // Layer order, bottom -> top. Re-applied whenever a layer is added/removed.
@@ -23,9 +25,11 @@ const LAYER_ORDER = [
   "ts-overlay",
   "ts-flood-shore",
   "ts-infra-buildings",
+  "ts-valley-rim",
   "ts-infra-roads",
   "ts-infra-facilities",
   "ts-exposed-dots",
+  "ts-plan-3d",
   "ts-plan-assets",
   "ts-pulse",
   "ts-annos",
@@ -36,8 +40,14 @@ const QUIET_SRC = {
   data: { type: "FeatureCollection", features: [] },
 } as const;
 
-function fc(features: GeoFeature[]): FeatureCollection {
-  return { type: "FeatureCollection", features };
+function fc(
+  features: ReadonlyArray<{
+    type: "Feature";
+    properties: Record<string, unknown>;
+    geometry: unknown;
+  }>,
+): FeatureCollection {
+  return { type: "FeatureCollection", features: features as FeatureCollection["features"] };
 }
 
 function webgl2Available(): boolean {
@@ -97,6 +107,8 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
   const webgl2 = useRef<boolean>(webgl2Available());
   // maplibre v6 only allows style mutations after the style has loaded.
   const [mapLoaded, setMapLoaded] = useState(false);
+  // Hover label over the voxel blocks (position + copy).
+  const [tip, setTip] = useState<{ x: number; y: number; text: string } | null>(null);
 
   const city = useStore((s) => s.city);
   const mode = useStore((s) => s.mode);
@@ -113,10 +125,17 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
   const showFacilities = useStore((s) => s.showFacilities);
   const showSuitability = useStore((s) => s.showSuitability);
   const terrain3d = useStore((s) => s.terrain3d);
+  const showBlocky3d = useStore((s) => s.showBlocky3d);
+  const showValleyRim = useStore((s) => s.showValleyRim);
   // OSM ids -> facility features, for tinting exposed assets after a run.
   const facilitiesRef = useRef<Map<string, GeoFeature>>(new Map());
   // Water-layer features keyed by OSM id, for drawing the selected river.
   const waterRef = useRef<Map<string, GeoFeature>>(new Map());
+  // Raw centroid buildings (per city) and their stylised 3D block features.
+  const buildingsRef = useRef<GeoFeature[]>([]);
+  const blocksRef = useRef<BlockFeature[]>([]);
+  // Valley-rim line (dashed boundary of the sim basin), per city.
+  const rimRef = useRef<FeatureCollection | null>(null);
   // Brush used to draw the quake pulse halo; kept in a ref so the rAF loop
   // doesn't re-subscribe on every pixel.
   const pulseRef = useRef<{ radius: number; color: string } | null>(null);
@@ -158,18 +177,34 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
             id: "ts-osm",
             type: "raster",
             source: "osm",
-            paint: { "raster-opacity": 0.85 },
+            // FireRed treatment: pull the stock OSM tiles toward the muted
+            // greens/teals of the palette so they read as a stylised base
+            // under the voxel blocks, not a default-looking web map.
+            paint: {
+              "raster-opacity": 0.55,
+              "raster-saturation": -0.6,
+              "raster-hue-rotate": 55,
+              "raster-brightness-min": 0.78,
+              "raster-brightness-max": 0.98,
+              "raster-contrast": 0.15,
+            },
           },
         ],
       },
       center: [85.34, 27.7],
       zoom: 12,
+      pitch: 55,
       attributionControl: false,
+      canvasContextAttributes: { antialias: true },
     });
 
     map.addControl(
       new maplibregl.AttributionControl({ compact: true }),
       "bottom-right",
+    );
+    map.addControl(
+      new maplibregl.NavigationControl({ showCompass: false }),
+      "bottom-left",
     );
 
     // Surface fatal map errors instead of a silent blank canvas. Tile-level
@@ -217,6 +252,8 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
       map.addSource("ts-infra-roads", QUIET_SRC as never);
       map.addSource("ts-infra-facilities", QUIET_SRC as never);
       map.addSource("ts-plan-assets", QUIET_SRC as never);
+      map.addSource("ts-plan-3d", QUIET_SRC as never);
+      map.addSource("ts-valley-rim", QUIET_SRC as never);
       map.addSource("ts-annos", QUIET_SRC as never);
       map.addSource("ts-flood-shore", QUIET_SRC as never);
       map.addSource("ts-exposed", QUIET_SRC as never);
@@ -318,13 +355,44 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
       });
       map.addLayer({
         id: "ts-infra-buildings",
-        type: "circle",
+        type: "fill-extrusion",
         source: "ts-infra-buildings",
         paint: {
-          "circle-radius": 1.6,
-          "circle-color": "#314137",
-          "circle-opacity": 0.8,
+          // A hazard band (from a sim run) tints the whole block; silent
+          // blocks keep their silhouette colour.
+          "fill-extrusion-color": [
+            "match",
+            ["get", "band"],
+            "flood",
+            "#43C7D8",
+            "high",
+            "#E34B4B",
+            "medium_high",
+            "#E59B45",
+            "medium",
+            "#E6C66A",
+            "low",
+            "#159A9C",
+            ["get", "color"],
+          ],
+          "fill-extrusion-height": ["get", "height"],
+          "fill-extrusion-base": 0,
+          "fill-extrusion-opacity": 0.92,
+          "fill-extrusion-vertical-gradient": true,
         },
+        layout: { visibility: "visible" },
+      });
+      map.addLayer({
+        id: "ts-valley-rim",
+        type: "line",
+        source: "ts-valley-rim",
+        paint: {
+          "line-color": "#159A9C",
+          "line-width": 2.2,
+          "line-opacity": 0.8,
+          "line-dasharray": [2.5, 1.5],
+        },
+        layout: { visibility: "none" },
       });
       map.addLayer({
         id: "ts-infra-roads",
@@ -345,6 +413,33 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
           "icon-size": 0.55,
           "icon-allow-overlap": true,
         },
+      });
+      map.addLayer({
+        id: "ts-plan-3d",
+        type: "fill-extrusion",
+        source: "ts-plan-3d",
+        paint: {
+          "fill-extrusion-color": [
+            "match",
+            ["get", "band"],
+            "flood",
+            "#43C7D8",
+            "high",
+            "#E34B4B",
+            "medium_high",
+            "#E59B45",
+            "medium",
+            "#E6C66A",
+            "low",
+            "#159A9C",
+            ["case", ["get", "selected"], "#EFE6C9", ["get", "color"]],
+          ],
+          "fill-extrusion-height": ["get", "height"],
+          "fill-extrusion-base": 0,
+          "fill-extrusion-opacity": 0.95,
+          "fill-extrusion-vertical-gradient": true,
+        },
+        layout: { visibility: "none" },
       });
       map.addLayer({
         id: "ts-plan-assets",
@@ -454,8 +549,48 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
       map.getCanvas().style.cursor = e.features?.length ? "pointer" : "";
     });
     map.on("mouseleave", "ts-infra-facilities", () => {
-      map.getCanvas().style.cursor = "";
-    });
+        map.getCanvas().style.cursor = "";
+      });
+
+    // --- voxel block hover labels -------------------------------------------
+    const tipFrom = (
+      e: maplibregl.MapLayerMouseEvent,
+      f: maplibregl.MapGeoJSONFeature | undefined,
+    ) => {
+      const width = map.getCanvas().clientWidth;
+      const x = Math.min(
+        Math.max(e.point.x + 14, 8),
+        width - 230,
+      );
+      const y = e.point.y + 16;
+      if (!f) {
+        setTip(null);
+        map.getCanvas().style.cursor = "";
+        return;
+      }
+      map.getCanvas().style.cursor = "pointer";
+      const p = (f.properties ?? {}) as Record<string, unknown>;
+      const band = p.band as string | undefined;
+      const tag = band
+        ? band === "flood"
+          ? "estimated flooded"
+          : `stylized ${band} band`
+        : "";
+      const height = Math.round(Number(p.height) || 0);
+      setTip({
+        x,
+        y,
+        text:
+          `${String(p.name ?? "Building")} · ~${height} m est.` +
+          (tag ? ` · ${tag}` : ""),
+      });
+    };
+    map.on("mousemove", "ts-infra-buildings", (e) =>
+      tipFrom(e, e.features?.[0]),
+    );
+    map.on("mouseleave", "ts-infra-buildings", (e) => tipFrom(e, undefined));
+    map.on("mousemove", "ts-plan-3d", (e) => tipFrom(e, e.features?.[0]));
+    map.on("mouseleave", "ts-plan-3d", (e) => tipFrom(e, undefined));
 
     mapRef.current = map;
     onReady?.();
@@ -473,10 +608,12 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
     if (initializedCity.current === city.id) return;
     initializedCity.current = city.id;
 
+    const target =
+      city.hazard_bounds ?? (city.bounds as [number, number, number, number]);
     map.fitBounds(
       [
-        [city.bounds[0], city.bounds[1]],
-        [city.bounds[2], city.bounds[3]],
+        [target[0], target[1]],
+        [target[2], target[3]],
       ],
       { padding: 60, duration: 600 },
     );
@@ -485,10 +622,28 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
 
     void Promise.all([
       api.layer(city.id, "buildings").then((data) => {
+        const raw = data?.features ?? [];
+        buildingsRef.current = raw;
+        blocksRef.current = buildBlockFeatures(raw);
         const source = map.getSource(
           "ts-infra-buildings",
-        ) as maplibregl.GeoJSONSource;
-        source?.setData(data ?? fc([]));
+        ) as maplibregl.GeoJSONSource | undefined;
+        source?.setData(fc(blocksRef.current));
+      }),
+      api.layer(city.id, "rim").then((data) => {
+        rimRef.current = data && data.features.length ? data : null;
+        const source = map.getSource("ts-valley-rim") as
+          | maplibregl.GeoJSONSource
+          | undefined;
+        source?.setData(rimRef.current ?? fc([]));
+        useStore.getState().setRimAvailable(Boolean(rimRef.current));
+        map.setLayoutProperty(
+          "ts-valley-rim",
+          "visibility",
+          rimRef.current && useStore.getState().showValleyRim
+            ? "visible"
+            : "none",
+        );
       }),
       api.layer(city.id, "roads").then((data) => {
         const source = map.getSource(
@@ -554,10 +709,22 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
     if (!map || !mapLoaded) return;
     const setVis = (id: string, on: boolean) =>
       map.setLayoutProperty(id, "visibility", on ? "visible" : "none");
-    setVis("ts-infra-buildings", showBuildings && mode === "existing");
+    setVis(
+      "ts-infra-buildings",
+      showBuildings && showBlocky3d && mode === "existing",
+    );
     setVis("ts-infra-roads", showRoads && mode === "existing");
     setVis("ts-infra-facilities", showFacilities && mode === "existing");
-  }, [showRoads, showBuildings, showFacilities, mode, mapLoaded]);
+  }, [showRoads, showBuildings, showFacilities, showBlocky3d, mode, mapLoaded]);
+
+  // --- valley rim outline ----------------------------------------------------
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapLoaded) return;
+    const on =
+      showValleyRim && Boolean(rimRef.current && rimRef.current.features.length);
+    map.setLayoutProperty("ts-valley-rim", "visibility", on ? "visible" : "none");
+  }, [showValleyRim, mapLoaded]);
 
   // --- terrain elevation ------------------------------------------------------
   useEffect(() => {
@@ -695,6 +862,11 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
       "visibility",
       pulseData.features.length ? "visible" : "none",
     );
+
+    const buildingSrc = map.getSource("ts-infra-buildings") as
+      | maplibregl.GeoJSONSource
+      | undefined;
+    buildingSrc?.setData(fc(applyBands(blocksRef.current, bandsFromResult(result))));
   }, [result, mapLoaded]);
 
   // --- annotations (flood source / epicenter) --------------------------------
@@ -751,13 +923,17 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !mapLoaded) return;
-    const source = map.getSource("ts-plan-assets") as
+    const symbolSrc = map.getSource("ts-plan-assets") as
+      maplibregl.GeoJSONSource | undefined;
+    const blockSrc = map.getSource("ts-plan-3d") as
       maplibregl.GeoJSONSource | undefined;
     if (mode !== "new") {
-      source?.setData(fc([]));
+      symbolSrc?.setData(fc([]));
+      blockSrc?.setData(fc([]));
+      map.setLayoutProperty("ts-plan-3d", "visibility", "none");
       return;
     }
-    source?.setData(
+    symbolSrc?.setData(
       fc(
         placed.map((a) => ({
           type: "Feature",
@@ -769,7 +945,22 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
         })),
       ),
     );
-  }, [placed, selectedAssetId, mode, mapLoaded]);
+    const blocks = buildAssetBlocks(
+      placed.map((a) => ({
+        id: a.id,
+        type: a.type,
+        lng: a.lng,
+        lat: a.lat,
+        selected: a.id === selectedAssetId,
+      })),
+    );
+    blockSrc?.setData(fc(applyBands(blocks, bandsFromResult(result))));
+    map.setLayoutProperty(
+      "ts-plan-3d",
+      "visibility",
+      blocks.length ? "visible" : "none",
+    );
+  }, [placed, selectedAssetId, mode, result, mapLoaded]);
 
   // --- keep layer stacking ----------------------------------------------------
   useEffect(() => {
@@ -807,5 +998,14 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
     );
   }
 
-  return <div ref={containerRef} className="map-canvas" />;
+  return (
+    <div className="map-shell">
+      <div ref={containerRef} className="map-canvas" />
+      {tip && (
+        <div className="building-tip" style={{ left: tip.x, top: tip.y }}>
+          {tip.text}
+        </div>
+      )}
+    </div>
+  );
 }

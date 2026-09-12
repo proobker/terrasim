@@ -2,6 +2,30 @@
 
 Status ledger for terrasim. Most recent at the top. `plans.md` is the spec; this file records what physically exists and what was verified.
 
+## 2026-09-12 — Valley-wide theatre + stylised 3D city blocks
+
+**Why**: the demo map read as a flat plan-view grid. Now hazards trace the real Kathmandu valley basin (wider DEM grid, overlays clipped to the lowland) and the city reads as a blocky toy-city: every building is a stylised 3D block with estimated height, and a sim run tints exposed blocks in band colours.
+
+**Backend.**
+- `scripts/fetch_data.py`:
+  - `CITIES["kathmandu"]` gains `hazard_bounds` [85.15, 27.54, 85.47, 27.75] and `valley_cap_m` 1450.0. DEM is fetched over `hazard_bounds` (grid 701×1068, was 534×668); OSM stays on the dense core bounds. `city.json` writes `hazard_bounds` + `valley_cap_m` + the widened grid.
+  - Buildings are now fetched with `extra_tags=("height","building:levels")` and `add_id=True` → `buildings.geojson` carries real OSM ids (4500 features; 361 named, 338 with `building:levels`, 13 with explicit `height`).
+  - New `rim_geojson()` derives the valley-bowl outline (4-connected lowland below `cap_m` → union of row-run boxes → exterior ring, simplified). It returns `None` — and writes no file — when the ring hugs the DEM border (>35% of ring points on the grid edge) or touches grid corners: an open basin (Kathmandu's NW plain open to the Terai) has no genuine valley ring, and drawing the DEM box as a "valley rim" would be both stock-looking and dishonest.
+- `app/engine/grid.py` gains `region_mask(cap_m)`; `earthquake.py` `quake_zones()`/`run()` and `flood.py` `_result()`/`run()`/`run_river()`/`flood_mask()`/`river_flood_mask()` accept an optional boolean region and mask all output shapes through it. `main.py` computes the region from `valley_cap_m` (`_valley_region`) and passes it for both hazards.
+- `app/datasets.py` permits `"rim"` as a layer kind (404 when absent).
+- `test_engine.py` grows two region-clip tests (quake zones strictly inside basin; flood trims outer extent). 32 tests pass.
+
+**Data.** kathmandu bundle rebuilt: DEM 701×1068 over hazard bounds, `city.json` updated, no `rim.geojson` for kathmandu (correctly — open basin).
+
+**Frontend.**
+- New `src/buildings3d.ts`: builds stylised blocks from centroid buildings — deterministic FNV-1a hash drives footprint size (10–22 m) and 0/45° twist; `estimateHeight()` prefers OSM `height`, then `building:levels`, then a type table (always *estimated*, clamped 3–60 m); FireRed palette silhouette colours; `applyBands()` tints blocks by quake band / flood via a `band` property; `buildAssetBlocks()` gives placed assets per-type footprints/heights/colours with selected-highlight.
+- `MapView.tsx`: `ts-infra-buildings` is now `fill-extrusion` (block height from `["get","height"]`, band-tinted where exposed, vertical gradient, clamped base 0) instead of the old circle layer; new `ts-valley-rim` dashed Teal line (only when the city ships rim data) and `ts-plan-3d` extrusion under the plan-asset icons; OSM raster first gets a FireRed treatment (`raster-saturation -0.6`, `raster-hue-rotate 55`, opacity 0.55); map starts at `pitch: 55` with `antialias`, plus a themed NavigationControl; `fitBounds` uses `hazard_bounds ?? bounds`; hover tooltip over blocks reads "~N m est." + band tag.
+- `store.ts`: `showBlocky3d`, `showValleyRim`, `rimAvailable` (+ setters). `SidePanel.tsx`: "3D blocks" and (when rim data exists) "Valley rim" toggles. `index.css`: `.map-shell`, `.building-tip`, maplibre control/attribution theming. `types.ts`: `CityInfo.hazard_bounds`/`valley_cap_m`, `LayerKind` += `"rim"`.
+
+**Docs.** This entry; AGENTS.md repo map + gotchas; plans.md §44 existing-city beat.
+
+**Verified live.** `uv run pytest` 32 passed. `npx tsc --noEmit -p tsconfig.app.json` and `npm run build` pass; oxlint clean except a pre-existing ExposurePanel warning. TestClient smoke on the rebuilt bundle: `/api/cities` returns `hazard_bounds` + `valley_cap_m` + 1068×701 grid; buildings layer carries ids; `layers/rim` → 404; Rudramati 3 m `rise` → `dry:false`, 4361 cells (~4.31 km², peak depth 7.4 m); 6.5 M / 10 km quake at city centre → zone shapes clipped to the basin (`area_km2` = high 67.77, medium_high 247.48, medium 43.92, low 0.0 — the low ring falls off-grid and the ridge corners are carved out).
+
 ## 2026-09-12 — Water normalisation: fragmented OSM rivers merged into single features
 
 **Why**: flood v2 reads tributary volume off the D8 basins of mapped waterlines. OSM splits one physical river into many short, disjoint ways (Seti gaps measured up to 9 km) — as-is, one river counted as dozens of tiny tributaries and understated reach volume.

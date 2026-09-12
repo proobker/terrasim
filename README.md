@@ -70,7 +70,7 @@ python scripts/fetch_data.py --all
 | ------ | --------------------------------- | ----------------------------------------- |
 | GET    | `/api/health`                     | Health check                              |
 | GET    | `/api/cities`                     | List available demo areas                 |
-| GET    | `/api/cities/{id}/layers/{kind}`  | Buildings / roads / facilities / water GeoJSON |
+| GET    | `/api/cities/{id}/layers/{kind}`  | Buildings / roads / facilities / water / rim GeoJSON |
 | GET    | `/api/cities/{id}/rivers`         | River summaries for flood hypothesis selection |
 | GET    | `/api/cities/{id}/dem`            | Elevation raster metadata + tiles         |
 | POST   | `/api/simulate/flood`             | Flood scenario → extent + exposure        |
