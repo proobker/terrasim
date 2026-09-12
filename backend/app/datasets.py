@@ -56,8 +56,8 @@ def load_city_dem(city_id: str) -> DemGrid:
 
 
 def load_layer(city_id: str, kind: str) -> dict:
-    """Return a GeoJSON FeatureCollection for buildings/roads/facilities/water."""
-    if kind not in ("buildings", "roads", "facilities", "water"):
+    """Return a GeoJSON FeatureCollection for buildings/roads/facilities/water/rim."""
+    if kind not in ("buildings", "roads", "facilities", "water", "rim"):
         raise ValueError(f"unknown layer kind: {kind}")
     with (_city_dir(city_id) / f"{kind}.geojson").open("r", encoding="utf-8") as fh:
         return json.load(fh)

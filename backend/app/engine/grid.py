@@ -75,6 +75,10 @@ class DemGrid:
         h_m = self.res_lat * KM_PER_DEG_LAT * METERS_PER_KM
         return w_m * h_m
 
+    def region_mask(self, cap_m: float) -> np.ndarray:
+        """Cells at or below ``cap_m`` metres — the lowland / valley floor."""
+        return self.elev <= float(cap_m)
+
 
 def load_dem(city_dir: Path) -> DemGrid:
     """Load the cached elevation raster + georeferencing for a city bundle."""

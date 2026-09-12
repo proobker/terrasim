@@ -30,6 +30,20 @@ def _assets_for(scenario: FloodScenario | EarthquakeScenario) -> dict[str, list[
         return assets
     return datasets.load_assets(scenario.city_id)
 
+
+def _valley_region(grid, city_id: str):
+    """Boolean raster of the lowland basin, or None when the city has no cap.
+
+    Lets scenario overlays trace the real geographic region (e.g. the
+    Kathmandu valley bowl) instead of a grid rectangle.
+    """
+    try:
+        meta = datasets.city_meta(city_id)
+    except FileNotFoundError:
+        return None
+    cap = meta.get("valley_cap_m")
+    return grid.region_mask(cap) if cap is not None else None
+
 app = FastAPI(
     title="terrasim",
     version=__version__,
@@ -118,7 +132,20 @@ def simulate_flood(scenario: FloodScenario) -> dict:
         coords = datasets.line_vertices(geometry)
         if not coords:
             raise HTTPException(status_code=400, detail=f"river has no usable geometry: {scenario.river_id}")
-        result = flood.run_river(grid, coords, scenario.level_m, scenario.mode)
+        water_features = None
+        if scenario.include_tributaries:
+            try:
+                water_features = datasets.load_layer(scenario.city_id, "water").get("features") or None
+            except FileNotFoundError:
+                water_features = None
+        result = flood.run_river(
+            grid,
+            coords,
+            scenario.level_m,
+            scenario.mode,
+            water_features,
+            region=_valley_region(grid, scenario.city_id),
+        )
     else:
         assert scenario.source is not None
         result = flood.run(
@@ -127,6 +154,7 @@ def simulate_flood(scenario: FloodScenario) -> dict:
             scenario.source.lat,
             scenario.level_m,
             scenario.mode,
+            region=_valley_region(grid, scenario.city_id),
         )
     response = {
         "kind": "flood",
@@ -136,18 +164,7 @@ def simulate_flood(scenario: FloodScenario) -> dict:
         "dry": result["dry"],
     }
     if not result["dry"]:
-        if scenario.river_id is not None:
-            masked, _ = flood.river_flood_mask(grid, coords, scenario.level_m, scenario.mode)
-        else:
-            assert scenario.source is not None
-            masked, _ = flood.flood_mask(
-                grid,
-                scenario.source.lng,
-                scenario.source.lat,
-                scenario.level_m,
-                scenario.mode,
-            )
-        response["exposure"] = exposure.evaluate_flood_exposure(grid, assets, masked)
+        response["exposure"] = exposure.evaluate_flood_exposure(grid, assets, result["mask"])
     return response
 
 
@@ -165,6 +182,7 @@ def simulate_earthquake(scenario: EarthquakeScenario) -> dict:
         scenario.epicenter.lat,
         scenario.magnitude,
         scenario.depth_km,
+        region=_valley_region(grid, scenario.city_id),
     )
     hazard = {
         "kind": "earthquake",

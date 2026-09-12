@@ -143,6 +143,17 @@ const ICONS: Record<string, () => Sprite> = {
       rect(g, 6, 6, 4, 6, "#E6C66A");
       rect(g, 2, 12, 12, 4, "#B08a5f");
     }),
+  flow: () =>
+    sprite(16, (g) => {
+      const c = "#6FE3F0";
+      rect(g, 1, 6, 5, 4, c);
+      rect(g, 6, 5, 6, 2, c);
+      rect(g, 8, 3, 5, 2, c);
+      rect(g, 10, 1, 4, 2, c);
+      rect(g, 6, 9, 6, 2, c);
+      rect(g, 8, 11, 5, 2, c);
+      rect(g, 10, 13, 4, 2, c);
+    }),
 };
 
 const ICON_ATLAS: Record<string, string> = {
@@ -157,6 +168,7 @@ const ICON_ATLAS: Record<string, string> = {
   higher_ed: "ts-school",
   epicenter: "ts-epicenter",
   source: "ts-source",
+  flow: "ts-flow",
 };
 
 export function atlasDefinitions(): Record<string, Sprite> {

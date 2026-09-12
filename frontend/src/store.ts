@@ -34,6 +34,9 @@ interface TerrasimState {
   showFacilities: boolean;
   showSuitability: boolean;
   terrain3d: boolean;
+  showBlocky3d: boolean;
+  showValleyRim: boolean;
+  rimAvailable: boolean;
   facilityDetail: { name?: string; type?: string } | null;
 
   setCities: (cities: CityInfo[]) => void;
@@ -62,6 +65,9 @@ interface TerrasimState {
   setShowFacilities: (v: boolean) => void;
   setShowSuitability: (v: boolean) => void;
   setTerrain3d: (v: boolean) => void;
+  setShowBlocky3d: (v: boolean) => void;
+  setShowValleyRim: (v: boolean) => void;
+  setRimAvailable: (v: boolean) => void;
   setFacilityDetail: (d: { name?: string; type?: string } | null) => void;
   setPickingOrigin: (v: boolean) => void;
 }
@@ -97,6 +103,9 @@ export const useStore = create<TerrasimState>((set) => ({
   showFacilities: true,
   showSuitability: true,
   terrain3d: true,
+  showBlocky3d: true,
+  showValleyRim: true,
+  rimAvailable: false,
   facilityDetail: null,
 
   setCities: (cities) => set({ cities }),
@@ -128,6 +137,9 @@ export const useStore = create<TerrasimState>((set) => ({
   setShowFacilities: (showFacilities) => set({ showFacilities }),
   setShowSuitability: (showSuitability) => set({ showSuitability }),
   setTerrain3d: (terrain3d) => set({ terrain3d }),
+  setShowBlocky3d: (showBlocky3d) => set({ showBlocky3d }),
+  setShowValleyRim: (showValleyRim) => set({ showValleyRim }),
+  setRimAvailable: (rimAvailable) => set({ rimAvailable }),
   setFacilityDetail: (facilityDetail) => set({ facilityDetail }),
   setPickingOrigin: (pickingOrigin) => set({ pickingOrigin }),
 }));

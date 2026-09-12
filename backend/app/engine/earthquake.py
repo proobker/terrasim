@@ -74,12 +74,27 @@ def quake_labels(grid: DemGrid, epicenter_lng: float, epicenter_lat: float, magn
     return labels.reshape(grid.nrows, grid.ncols)
 
 
-def quake_zones(grid: DemGrid, epicenter_lng: float, epicenter_lat: float, magnitude: float, depth_km: float) -> dict:
-    """Return zone overlay layers (one FeatureCollection per band + metadata)."""
+def quake_zones(
+    grid: DemGrid,
+    epicenter_lng: float,
+    epicenter_lat: float,
+    magnitude: float,
+    depth_km: float,
+    *,
+    region: np.ndarray | None = None,
+) -> dict:
+    """Return zone overlay layers (one FeatureCollection per band + metadata).
+
+    ``region`` (an optional boolean raster) clips each band to a geographic
+    area — e.g. the valley floor — so the zones trace the real terrain basin
+    instead of a grid rectangle or an idealized circle.
+    """
     labels = quake_labels(grid, epicenter_lng, epicenter_lat, magnitude, depth_km)
     layers: dict[str, dict] = {}
     for band_idx, band_name in enumerate(BANDS, start=1):
         mask = labels == band_idx
+        if region is not None:
+            mask = mask & region
         polygons = mask_to_polygons(mask, grid)
         layers[band_name] = {
             "type": "FeatureCollection",
@@ -116,13 +131,26 @@ def band_radius_km(band: str, magnitude: float, depth_km: float) -> float:
     return round(float(np.sqrt(r)), 1)
 
 
-def run(grid: DemGrid, epicenter_lng: float, epicenter_lat: float, magnitude: float, depth_km: float) -> dict:
-    zones = quake_zones(grid, epicenter_lng, epicenter_lat, magnitude, depth_km)
+def run(
+    grid: DemGrid,
+    epicenter_lng: float,
+    epicenter_lat: float,
+    magnitude: float,
+    depth_km: float,
+    *,
+    region: np.ndarray | None = None,
+) -> dict:
+    zones = quake_zones(
+        grid, epicenter_lng, epicenter_lat, magnitude, depth_km, region=region
+    )
     labels = quake_labels(grid, epicenter_lng, epicenter_lat, magnitude, depth_km)
     area_by_band = {}
     radii_km = {}
     for band_idx, band_name in enumerate(BANDS, start=1):
-        cells = int((labels == band_idx).sum())
+        band_cells = labels == band_idx
+        if region is not None:
+            band_cells = band_cells & region
+        cells = int(band_cells.sum())
         area_by_band[band_name] = round(
             cells * grid.cell_area_m2((grid.min_lat + grid.max_lat) / 2.0) / 1e6, 2
         )

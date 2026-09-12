@@ -13,14 +13,21 @@
     85.44,
     27.78
   ],
+  "hazard_bounds": [
+    85.15,
+    27.54,
+    85.47,
+    27.75
+  ],
   "zoom": 13,
   "grid": {
-    "ncols": 668,
-    "nrows": 534,
+    "ncols": 1068,
+    "nrows": 701,
     "res_deg": 0.0003
   },
   "attribution": [
     "Map data \u00a9 OpenStreetMap contributors (ODbL)",
     "Elevation: Mapzen terrain tiles (Terrarium)"
-  ]
+  ],
+  "valley_cap_m": 1450.0
 }

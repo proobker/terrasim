@@ -425,6 +425,17 @@ It does not automatically account for every factor such as:
 -   detailed channel hydraulics
 -   time-dependent water movement
 
+The flood engine is **flow-routed and volume-conserving**: a D8
+steepest-descent direction raster routes water downhill, and a rise is
+converted into a conserved volume released as a transient triangular
+hydrograph over simulated hours. The wave travels along the selected
+river's flow path (upstream floods first), spills onto connected low
+ground until its volume is spent, and mapped waterlines whose basins drain
+into that river contribute volume as tributaries, lagged by their distance
+to the junction. Extent and depth are the peak state of the whole run;
+timings and peak discharge are hypothetical, derived from assumed flow
+speeds, never a forecast. Different rivers give different extents.
+
 Therefore, call it:
 
 > **Terrain-based hypothetical flood extent**
@@ -2088,6 +2099,17 @@ Toggle infrastructure.
 
 > "Now we can see which roads and critical facilities fall inside the
 > estimated higher-exposure area."
+
+Toggle 3D blocks / tilt. (Map opens pitched over the valley basin; the
+stylised toy blocks pop with the terrain.)
+
+> "Every building is shown as an estimated-height block — when the hazard
+> hits, the exposed blocks tint to the band colours."
+
+Pan the overlay (valley-wide, not the old box).
+
+> "The simulation covers the whole valley floor, not just a square around
+> the map."
 
 ------------------------------------------------------------------------
 

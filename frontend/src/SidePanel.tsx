@@ -18,24 +18,32 @@ function LayerToggles() {
   const showBuildings = useStore((s) => s.showBuildings);
   const showFacilities = useStore((s) => s.showFacilities);
   const terrain3d = useStore((s) => s.terrain3d);
+  const showBlocky3d = useStore((s) => s.showBlocky3d);
+  const showValleyRim = useStore((s) => s.showValleyRim);
   const setShowRoads = useStore((s) => s.setShowRoads);
   const setShowBuildings = useStore((s) => s.setShowBuildings);
   const setShowFacilities = useStore((s) => s.setShowFacilities);
   const setTerrain3d = useStore((s) => s.setTerrain3d);
+  const setShowBlocky3d = useStore((s) => s.setShowBlocky3d);
+  const setShowValleyRim = useStore((s) => s.setShowValleyRim);
+  const rimAvailable = useStore((s) => s.rimAvailable);
+  const toggles = (
+    [
+      ["roads", showRoads, setShowRoads],
+      ["buildings", showBuildings, setShowBuildings],
+      ["facilities", showFacilities, setShowFacilities],
+      ["3D buildings", showBlocky3d, setShowBlocky3d],
+      ...(rimAvailable ? [["Valley rim", showValleyRim, setShowValleyRim] as [string, boolean, (v: boolean) => void]] : []),
+      ["3D terrain", terrain3d, setTerrain3d],
+    ] as [string, boolean, (v: boolean) => void][]
+  );
   return (
     <div>
       <div className="pixel-label" style={{ marginBottom: 6 }}>
         Infrastructure overlay
       </div>
-      <div className="field-row" style={{ margin: 0 }}>
-        {(
-          [
-            ["roads", showRoads, setShowRoads],
-            ["buildings", showBuildings, setShowBuildings],
-            ["facilities", showFacilities, setShowFacilities],
-            ["3D terrain", terrain3d, setTerrain3d],
-          ] as [string, boolean, (v: boolean) => void][]
-        ).map(([label, on, setOn]) => (
+      <div className="field-row" style={{ margin: 0, flexWrap: "wrap", rowGap: 8 }}>
+        {toggles.map(([label, on, setOn]) => (
           <label key={label} style={{ display: "flex", gap: 6, alignItems: "center", cursor: "pointer" }}>
             <input
               type="checkbox"
@@ -71,8 +79,8 @@ function FloodOriginPicker() {
         ))}
       </select>
       <div className="mini-note">
-        Pick a river to flood along the whole channel, or tap the map for a point origin. A river is an estimated,
-        evenly rising water level — not a forecast.
+        Pick a river to flood along its flow path, or tap the map for a point origin. Water is routed downhill along
+        the river's channel and rises above each reach's local bed — a terrain-based hypothetical extent, not a forecast.
       </div>
     </div>
   );

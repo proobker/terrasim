@@ -1,13 +1,19 @@
 """Terrarium-encoded DEM raster tiles served from a city bundle.
 
 The elevation raster in each bundle (``dem.npz`` + ``dem.meta.json``) is
-re-shipped as RGB PNG tiles for maplibre-gl ``raster-dem`` sources using
+re-shipped as 512x512 RGB PNG tiles for maplibre-gl ``raster-dem`` sources using
 the Mapzen Terrarium encoding:
 
     elevation_m = (R * 256 + G + B / 256) - 32768
 
-The encoder is dependency-free (stdlib zlib/struct) so the runtime server
-does not require Pillow.
+Rows are sampled on the tile's Mercator-exact latitude grid (not linear
+latitude) so each elevation lands on the exact ground spot maplibre's terrain
+mesh draws it at. Coverage is the DEM extent plus a ``PAD_FRAC`` margin: tiles
+inside it are served edge-clamped, which keeps the terrain mesh from falling
+back to maplibre's flat 0 m plane while the camera is over the valley.
+
+The encoder is dependency-free (stdlib zlib/struct) so the runtime server does
+not require Pillow.
 """
 
 from __future__ import annotations
@@ -21,9 +27,20 @@ import numpy as np
 
 from app.engine.grid import DemGrid
 
-TILE = 256
+# DEM tiles are served at 512 px a side. maplibre v6 terrain composites each
+# terrain tile to a 2x render-to-texture of the *declared* source tileSize, so a
+# 512 px tile yields a 1024 px RTT and a 128x128 mesh over a *smaller* per-tile
+# ground area — i.e. a denser mesh that hugs the valley walls instead of
+# sketching huge stretched quads on steep slopes.
+TILE = 512
 MIN_ZOOM = 7
 MAX_ZOOM = 15
+# Coverage padding past the DEM extent, as a fraction of the DEM's own size.
+# Any tile inside the padded box is served (edge-clamped once outside the DEM),
+# so the terrain mesh never falls back to maplibre's flat 0 m fallback while the
+# fitted/tilted camera is over the valley. Tiles far outside still 404 and keep
+# the cache bounded.
+PAD_FRAC = 0.5
 
 
 def _grid(city_id: str) -> DemGrid:
@@ -75,6 +92,38 @@ def _png_rgb(rgb: np.ndarray) -> bytes:
     )
 
 
+def _padded_extent(grid: DemGrid) -> tuple[float, float, float, float]:
+    """Coverage box: the DEM extent inflated by ``PAD_FRAC`` on each side.
+
+    Tiles intersecting this box are always served (clamped to the DEM edge
+    outside it), which keeps maplibre's terrain mesh from dropping to its flat
+    0 m fallback while the fitted/tilted camera is anywhere near the DEM.
+    """
+    pad_lng = (grid.max_lng - grid.min_lng) * PAD_FRAC
+    pad_lat = (grid.max_lat - grid.min_lat) * PAD_FRAC
+    return (
+        grid.min_lng - pad_lng,
+        grid.min_lat - pad_lat,
+        grid.max_lng + pad_lng,
+        grid.max_lat + pad_lat,
+    )
+
+
+def _tile_lats(z: int, y: int) -> np.ndarray:
+    """Mercator-exact latitude for every pixel row of tile (z, x, y).
+
+    A slippy tile is uniform in Web Mercator *y*, not in geographic latitude.
+    Sampling linearly in lat (as a naive re-sampler does) places each pixel's
+    elevation at a slightly different ground spot than where maplibre's terrain
+    mesh draws that pixel, skewing the surface against the draped base map. This
+    computes the true row latitude so each elevation lands exactly on its mesh
+    vertex.
+    """
+    n = float(2**z)
+    f = (y + (np.arange(TILE, dtype=np.float64) + 0.5) / TILE) / n
+    return np.degrees(np.arctan(np.sinh(np.pi * (1.0 - 2.0 * f))))
+
+
 def _sample(grid: DemGrid, lngs: np.ndarray, lats: np.ndarray) -> np.ndarray:
     """Bilinearly sample the DEM at arbitrary lng/lat arrays (cell-centre)."""
     rows, cols = grid.elev.shape
@@ -106,22 +155,23 @@ def tile(city_id: str, z: int, x: int, y: int) -> bytes | None:
         return None
     grid = _grid(city_id)
     lng_min, lat_min, lng_max, lat_max = tile_bbox(z, x, y)
+    pad_lng_min, pad_lat_min, pad_lng_max, pad_lat_max = _padded_extent(grid)
     if (
-        lng_max <= grid.min_lng
-        or lng_min >= grid.max_lng
-        or lat_max <= grid.min_lat
-        or lat_min >= grid.max_lat
+        lng_max <= pad_lng_min
+        or lng_min >= pad_lng_max
+        or lat_max <= pad_lat_min
+        or lat_min >= pad_lat_max
     ):
         return None
     js = np.arange(TILE, dtype=np.float64) + 0.5
     lngs = lng_min + (lng_max - lng_min) * (js / TILE)
-    lats = lat_min + (lat_max - lat_min) * (js / TILE)
+    lats = _tile_lats(z, y)
     lng_grid, lat_grid = np.meshgrid(lngs, lats)
     elev = _sample(grid, lng_grid, lat_grid)
     return _png_rgb(_encode_terrarium(elev))
 
 
-@lru_cache(maxsize=4096)
+@lru_cache(maxsize=2048)
 def tile_bytes(city_id: str, z: int, x: int, y: int) -> bytes | None:
     """Cached ``tile()`` — keyed on tile coordinates, not raw bytes."""
     return tile(city_id, z, x, y)

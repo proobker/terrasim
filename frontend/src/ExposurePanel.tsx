@@ -38,7 +38,8 @@ export default function ExposurePanel() {
   if (result.kind === "flood") {
     const { stats, dry, exposure } = result;
     return (
-      <div className="panel-body" style={{ gap: 8 }}>
+      <section className="pixel-panel">
+        <div className="panel-body" style={{ gap: 8 }}>
         <div className="chrome-title">Estimated Flood Extent</div>
         {dry ? (
           <div className="mini-note">
@@ -58,11 +59,17 @@ export default function ExposurePanel() {
               </div>
               <div className="stat-box">
                 <div className="num">{stats.water_surface_m.toFixed(0)}m</div>
-                <div className="lbl">water surface</div>
+                <div className="lbl">peak water surface</div>
               </div>
               <div className="stat-box">
                 <div className="num">{(stats.max_depth_m ?? 0).toFixed(1)}m</div>
                 <div className="lbl">max modelled depth</div>
+              </div>
+              <div className="stat-box">
+                <div className="num">
+                  {stats.volume_m3 != null ? (stats.volume_m3 / 1e6).toFixed(1) : "0"}M
+                </div>
+                <div className="lbl">m³ routed (est.)</div>
               </div>
               <div className="stat-box">
                 <div className="num">{exposure ? Object.keys(exposure.assets).length : 0}</div>
@@ -72,9 +79,17 @@ export default function ExposurePanel() {
             {mode === "new" && placed.length > 0 && (
               <PlannedVerdicts result={result} />
             )}
+            {result.scenario.river_id && (
+              <div className="mini-note" style={{ marginTop: 6 }}>
+                Water was routed as a volume-limited wave along the river's downhill flow path
+                {stats.peak_discharge_m3s ? ` over ~${stats.sim_hours ?? 0} h, peaking at ~${stats.peak_discharge_m3s.toFixed(0)} m³/s` : ""}
+                {stats.tributaries ? ", fed by its mapped tributaries" : ""}. Scenario-based estimate, not a forecast.
+              </div>
+            )}
           </>
         )}
-      </div>
+        </div>
+      </section>
     );
   }
 
@@ -90,7 +105,8 @@ export default function ExposurePanel() {
       </div>
     ) : null;
   return (
-    <div className="panel-body" style={{ gap: 8 }}>
+    <section className="pixel-panel">
+      <div className="panel-body" style={{ gap: 8 }}>
       <div className="chrome-title">Estimated Shaking Intensity</div>
       <div className="stat-grid">
         <div className="stat-box">
@@ -112,7 +128,8 @@ export default function ExposurePanel() {
       </div>
       {radiiNote}
       {mode === "new" && placed.length > 0 && <PlannedVerdicts result={result} />}
-    </div>
+      </div>
+    </section>
   );
 }
 

@@ -7,12 +7,14 @@ export interface CityInfo {
   status: string;
   center: [number, number];
   bounds: [number, number, number, number];
+  hazard_bounds?: [number, number, number, number];
+  valley_cap_m?: number;
   zoom: number;
   grid: { ncols: number; nrows: number; res_deg: number };
   attribution: string[];
 }
 
-export type LayerKind = "buildings" | "roads" | "facilities" | "water";
+export type LayerKind = "buildings" | "roads" | "facilities" | "water" | "rim";
 
 export interface RiverSummary {
   id: string;
@@ -70,6 +72,11 @@ export interface FloodStats {
   max_depth_m?: number;
   mean_depth_m?: number;
   deep_area_km2?: number;
+  volume_m3?: number;
+  sim_hours?: number;
+  peak_discharge_m3s?: number;
+  tributaries?: number;
+  reach_cells?: number;
 }
 
 export interface ExposedAsset {
