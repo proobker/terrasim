@@ -58,6 +58,47 @@ function webgl2Available(): boolean {
   }
 }
 
+// MapLibre composites each terrain tile into a cached render-to-texture
+// (RTT). When fill-extrusion data arrives/asynchronously changes *after* that
+// composite (network loads, band tints, moved assets), some tiles keep
+// rendering the stale — flat — version until an interaction churns the cache
+// (maplibre-gl#3001). Release the cached composites so the next frame
+// re-draws extrusions on the live terrain.
+function refreshTerrainRTT(map: maplibregl.Map) {
+  try {
+    if (!map.terrain) return;
+    map.terrain.tileManager.releaseAllRTT();
+    map.triggerRepaint();
+  } catch {
+    // terrain internals vary by maplibre version; best-effort refresh only
+  }
+}
+
+// Several effects (bands, moved assets, city swap) want an RTT rebuild on the
+// same frame — each naive rAF remounts the whole terrain (releaseAllRTT) and
+// recomposites everything once, which during bursts stretches the draped
+// raster across tiles mid-load. Coalesce to at most one release per frame.
+let terrainRttFlight: number | null = null;
+
+function scheduleTerrainRefresh(map: maplibregl.Map) {
+  if (terrainRttFlight !== null) return;
+  terrainRttFlight = requestAnimationFrame(() => {
+    terrainRttFlight = null;
+    refreshTerrainRTT(map);
+  });
+}
+
+// The DEM/tile renderer mirrors the backend's coverage padding (PAD_FRAC).
+const DEM_PAD = 0.5;
+
+function padBounds(
+  bounds: [number, number, number, number],
+): [number, number, number, number] {
+  const dx = (bounds[2] - bounds[0]) * DEM_PAD;
+  const dy = (bounds[3] - bounds[1]) * DEM_PAD;
+  return [bounds[0] - dx, bounds[1] - dy, bounds[2] + dx, bounds[3] + dy];
+}
+
 function applyTerrain(
   map: maplibregl.Map,
   cityId: string,
@@ -74,10 +115,13 @@ function applyTerrain(
     map.addSource("dem", {
       type: "raster-dem",
       tiles,
-      tileSize: 256,
+      // DEM tiles are 512px and maplibre v6 terrain composites each to a 2x
+      // RTT of the *declared* size — declare the true tile size so the mesh
+      // grid lines up with the draped raster instead of smearing it.
+      tileSize: 512,
       minzoom: 7,
       maxzoom: 15,
-      bounds,
+      bounds: padBounds(bounds),
       encoding: "terrarium",
     });
   }
@@ -187,6 +231,11 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
               "raster-brightness-min": 0.78,
               "raster-brightness-max": 0.98,
               "raster-contrast": 0.15,
+              // Terrain composites the base map into an RTT; the stock fade
+              // causes the raster to shimmer to white at every layer tile as
+              // it loads in, which looks like stretched translucent faces over
+              // the DEM. Snap to fully opaque once a tile is ready.
+              "raster-fade-duration": 0,
             },
           },
         ],
@@ -617,8 +666,16 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
       ],
       { padding: 60, duration: 600 },
     );
+    // The fitBounds camera sweep churns terrain RTT caches unevenly; recompose
+    // everything once it settles so no flat tile lingers at rest.
+    map.once("moveend", () => scheduleTerrainRefresh(map));
 
-    applyTerrain(map, city.id, city.bounds, useStore.getState().terrain3d);
+    applyTerrain(
+      map,
+      city.id,
+      city.hazard_bounds ?? (city.bounds as [number, number, number, number]),
+      useStore.getState().terrain3d,
+    );
 
     void Promise.all([
       api.layer(city.id, "buildings").then((data) => {
@@ -680,7 +737,8 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
           features.length ? "visible" : "none",
         );
       }),
-    ]).catch((err: unknown) => setError(String(err)));
+    ]).then(() => scheduleTerrainRefresh(map))
+      .catch((err: unknown) => setError(String(err)));
   }, [city, setError, mapLoaded]);
 
   // --- selected river highlight + flow direction (flood origin by river) -----
@@ -730,7 +788,13 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !mapLoaded || !city) return;
-    applyTerrain(map, city.id, city.bounds, terrain3d);
+    applyTerrain(
+      map,
+      city.id,
+      city.hazard_bounds ?? (city.bounds as [number, number, number, number]),
+      terrain3d,
+    );
+    if (terrain3d) scheduleTerrainRefresh(map);
   }, [terrain3d, city, mapLoaded]);
 
   // --- suitability overlay ---------------------------------------------------
@@ -867,6 +931,7 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
       | maplibregl.GeoJSONSource
       | undefined;
     buildingSrc?.setData(fc(applyBands(blocksRef.current, bandsFromResult(result))));
+    scheduleTerrainRefresh(map);
   }, [result, mapLoaded]);
 
   // --- annotations (flood source / epicenter) --------------------------------
@@ -960,6 +1025,7 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
       "visibility",
       blocks.length ? "visible" : "none",
     );
+    scheduleTerrainRefresh(map);
   }, [placed, selectedAssetId, mode, result, mapLoaded]);
 
   // --- keep layer stacking ----------------------------------------------------

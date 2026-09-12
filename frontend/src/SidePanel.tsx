@@ -32,7 +32,7 @@ function LayerToggles() {
       ["roads", showRoads, setShowRoads],
       ["buildings", showBuildings, setShowBuildings],
       ["facilities", showFacilities, setShowFacilities],
-      ["3D blocks", showBlocky3d, setShowBlocky3d],
+      ["3D buildings", showBlocky3d, setShowBlocky3d],
       ...(rimAvailable ? [["Valley rim", showValleyRim, setShowValleyRim] as [string, boolean, (v: boolean) => void]] : []),
       ["3D terrain", terrain3d, setTerrain3d],
     ] as [string, boolean, (v: boolean) => void][]

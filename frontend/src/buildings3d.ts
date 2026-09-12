@@ -119,19 +119,67 @@ export function squareCoord(
   return [[...pts, pts[0]]];
 }
 
-// Centroid Point buildings from the bundle -> stylised polygon blocks with
-// estimated heights. Frame of the whole visualisation: illustrative blocks,
-// not measured footprints.
+// Extract a usable Polygon ring set (fills the passthrough for `fill-extrusion`)
+// from an OSM Polygon/MultiPolygon geometry. OSM building ways are single-ring
+// Polygons; MultiPolygons keep only their first polygon so shapes stay simple.
+function polygonCoords(
+  geometry: GeoFeature["geometry"] | undefined,
+): number[][][] | null {
+  if (!geometry) return null;
+  if (geometry.type === "Polygon") {
+    const coords = geometry.coordinates as number[][][];
+    if (
+      Array.isArray(coords) &&
+      coords.length &&
+      Array.isArray(coords[0]) &&
+      Array.isArray(coords[0][0]) &&
+      typeof coords[0][0][0] === "number"
+    ) {
+      return coords;
+    }
+    return null;
+  }
+  if (geometry.type === "MultiPolygon") {
+    const parts = geometry.coordinates as number[][][][];
+    if (
+      Array.isArray(parts) &&
+      parts.length &&
+      Array.isArray(parts[0]) &&
+      parts[0].length &&
+      Array.isArray(parts[0][0]) &&
+      typeof parts[0][0][0] === "number"
+    ) {
+      return parts[0];
+    }
+  }
+  return null;
+}
+
+function ringCentroid(ring: number[][]): { lng: number; lat: number } {
+  let lng = 0;
+  let lat = 0;
+  for (const p of ring) {
+    lng += p[0];
+    lat += p[1];
+  }
+  return { lng: lng / ring.length, lat: lat / ring.length };
+}
+
+// Real OSM footprints where the bundle carries them (Polygon rings); bundles
+// that still serve centroids get the stylised-square fallback. Heights stay
+// *estimated* (OSM tags -> type table) and silhouette colours come from the
+// deterministic hash so nothing flickers between renders.
 export function buildBlockFeatures(raw: GeoFeature[]): BlockFeature[] {
   return raw.map((f) => {
     const props = (f.properties ?? {}) as Record<string, unknown>;
-    const coords = (f.geometry?.coordinates ?? []) as number[];
-    const lng = coords[0] ?? 0;
-    const lat = coords[1] ?? 0;
+    const footprint = polygonCoords(f.geometry);
     const id = props.id;
+    const pointCoords = (f.geometry?.coordinates ?? []) as number[];
+    const lng = footprint ? ringCentroid(footprint[0]).lng : pointCoords[0] ?? 0;
+    const lat = footprint ? ringCentroid(footprint[0]).lat : pointCoords[1] ?? 0;
     const seed = String(id ?? `${lng.toFixed(6)},${lat.toFixed(6)}`);
     const h = hash(seed);
-    const sizeM = 10 + (h % 13); // 10..22 m — compact toy-city density
+    const sizeM = 10 + (h % 13); // 10..22 m — compact toy-city density (fallback only)
     const rotDeg = (h % 2) * 45;
     return {
       type: "Feature",
@@ -141,7 +189,10 @@ export function buildBlockFeatures(raw: GeoFeature[]): BlockFeature[] {
         height: estimateHeight(props),
         color: typeDef(String(props.type ?? "")).color,
       },
-      geometry: { type: "Polygon", coordinates: squareCoord(lng, lat, sizeM, rotDeg) },
+      geometry: {
+        type: "Polygon",
+        coordinates: footprint ?? squareCoord(lng, lat, sizeM, rotDeg),
+      },
     } as BlockFeature;
   });
 }

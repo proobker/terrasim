@@ -137,13 +137,24 @@ def fetch_osm(bounds: list[float]) -> dict:
     buildings: dict[int, dict] = {}
     roads: dict[int, dict] = {}
     water: dict[int, dict] = {}
-    for w0, s0, e0, n0 in chunk_bboxes(bounds, splits=2):
+    # Buildings need full footprints (`out geom`), not centroids: keep chunks
+    # small (3x3) so mirrors reliably return full rings, not degenerate ways.
+    for w0, s0, e0, n0 in chunk_bboxes(bounds, splits=3):
         bbox = _bbox_str(w0, s0, e0, n0)
         buildings_query = (
             "[out:json][timeout:120];"
             f"(way[\"building\"]{bbox};);"
-            "out center 4000;"
+            "out geom 3000;"
         )
+        try:
+            merge_elements(buildings, post_overpass_any(buildings_query, min_elements=1).get("elements", []))
+        except RuntimeError:
+            print("  !! buildings chunk unavailable, skipped")
+        time.sleep(1)
+        if len(buildings) >= BUILDING_MAX:
+            break
+    for w0, s0, e0, n0 in chunk_bboxes(bounds, splits=2):
+        bbox = _bbox_str(w0, s0, e0, n0)
         roads_query = (
             "[out:json][timeout:120];"
             '(way["highway"~"^(motorway|trunk|primary|secondary|tertiary|residential|unclassified|living_street)$"]'
@@ -156,9 +167,9 @@ def fetch_osm(bounds: list[float]) -> dict:
             "out geom 2000;"
         )
         try:
-            merge_elements(buildings, post_overpass_any(buildings_query, min_elements=1).get("elements", []))
+            merge_elements(roads, post_overpass_any(roads_query, min_elements=1).get("elements", []))
         except RuntimeError:
-            print("  !! buildings chunk unavailable, skipped")
+            print("  !! roads chunk unavailable, skipped")
         time.sleep(1)
         try:
             merge_elements(roads, post_overpass_any(roads_query, min_elements=1).get("elements", []))
@@ -905,12 +916,14 @@ def build_city(city_id: str, force: bool = False) -> None:
 
     buildings = to_features(
         osm["buildings"].get("elements", []),
-        None,
-        True,
+        "geometry",
+        False,
         extra_tags=("height", "building:levels"),
         add_id=True,
     )
-    buildings = buildings[:BUILDING_MAX]
+    # Real footprints: drop sliver rings and any degenerate 2-point ways the
+    # mirrors returned, then keep the largest (most visible) BUILDING_MAX.
+    buildings = filter_buildings(buildings)[:BUILDING_MAX]
     roads = to_features(osm["roads"].get("elements", []), "geometry", False, keep_lines=True)
     water = to_features(
         osm["water"].get("elements", []),

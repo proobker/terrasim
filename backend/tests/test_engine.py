@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import struct
 import zlib
 from collections import deque
@@ -463,31 +464,100 @@ def terrain_decode(elev_m: float) -> np.ndarray:
     return np.array([r, g, b], dtype=np.uint8)
 
 
-def test_terrain_tile_roundtrips_terrarium(city):
-    grid = datasets.load_city_dem(city.name)
-    centre = tuple(datasets.city_meta(city.name)["center"])
-    z = 9
+def _tile_pixel_lng(lng_min: float, lng_max: float, j: int) -> float:
+    return lng_min + (lng_max - lng_min) * (j + 0.5) / terrain_tiles.TILE
+
+
+def _tile_pixel_lat(z: int, y: int, j: int) -> float:
+    n = float(2**z)
+    f = (y + (j + 0.5) / terrain_tiles.TILE) / n
+    return np.degrees(np.arctan(np.sinh(np.pi * (1 - 2 * f))))
+
+
+def _decode_elev(rgb: np.ndarray, row: int, col: int) -> float:
+    pix = col * 3
+    return (
+        float(rgb[row, pix]) * 256.0
+        + float(rgb[row, pix + 1])
+        + float(rgb[row, pix + 2]) / 256.0
+        - 32768.0
+    )
+
+
+def _centre_tile(grid: DemGrid, z: int) -> tuple[int, int]:
+    lng = (grid.min_lng + grid.max_lng) / 2.0
+    lat = (grid.min_lat + grid.max_lat) / 2.0
     n = 2**z
-    x = int((centre[0] + 180.0) / 360.0 * n)
-    m = (1.0 - np.log(np.tan(np.deg2rad(centre[1])) + 1.0 / np.cos(np.deg2rad(centre[1]))) / np.pi) / 2.0
-    y = int(m * n)
+    x = int((lng + 180.0) / 360.0 * n)
+    py = (1.0 - math.asinh(math.tan(math.radians(lat))) / math.pi) / 2.0 * n
+    return x, int(py) if not math.isnan(py) else 0
+
+
+def test_terrain_tile_roundtrips_terrarium(city):
+    """End-to-end: the tile's centre pixel equals a direct DEM sample at the
+    exact Mercator-exact position of that pixel (CRS + mercator row + encoder
+    all agree to sub-metre precision, not the old ±60 m tolerance)."""
+    grid = datasets.load_city_dem(city.name)
+    z = 10
+    x, y = _centre_tile(grid, z)
     data = terrain_tiles.tile(city.name, z, x, y)
     assert data is not None
     w, h, (mode, rgb) = decode_png_rgb(data)
-    assert (mode, w, h) == (2, 256, 256)
-    # decode the tile-centre pixel and compare with the DEM at that point
-    cx = 360.0 * ((x + 0.5) / n) - 180.0
-    cy = np.degrees(np.arctan(np.sinh(np.pi * (1 - 2 * (y + 0.5) / n))))
-    r, c = grid.cell(cx, cy)
-    expected = float(grid.elev[r, c])
-    pix = 128 * 3
-    got = (
-        float(rgb[128, pix]) * 256.0
-        + float(rgb[128, pix + 1])
-        + float(rgb[128, pix + 2]) / 256.0
-        - 32768.0
+    assert (mode, w, h) == (2, terrain_tiles.TILE, terrain_tiles.TILE)
+    c = terrain_tiles.TILE // 2
+    cx = _tile_pixel_lng(*terrain_tiles.tile_bbox(z, x, y)[::2], c)
+    cy = _tile_pixel_lat(z, y, c)
+    expected = float(
+        terrain_tiles._sample(grid, np.array([cx]), np.array([cy]))[0]
     )
-    assert abs(got - expected) < 60.0
-    # a tile far outside the DEM extent must return None (no coverage)
+    got = _decode_elev(rgb, c, c)
+    assert abs(got - expected) < 1.0
+    # a tile far outside the DEM (and its padding) must return None, as must a
+    # tile below the source minimum zoom.
     assert terrain_tiles.tile(city.name, z, 0, 0) is None
-    assert terrain_tiles.tile(city.name, 4, 0, 0) is None  # below MIN_ZOOM
+    assert terrain_tiles.tile(city.name, 4, 0, 0) is None
+
+
+def test_terrain_sample_hits_cell_centres(city):
+    """The DEM-cell-centre convention: sampling exactly a grid centre returns
+    that cell's elevation (no half-cell offset drift)."""
+    grid = datasets.load_city_dem(city.name)
+    nrows, ncols = grid.elev.shape
+    r, c = nrows // 2, ncols // 2
+    lng, lat = grid.cell_center(r, c)
+    got = float(terrain_tiles._sample(grid, np.array([lng]), np.array([lat]))[0])
+    assert abs(got - float(grid.elev[r, c])) < 0.01
+
+
+def test_terrain_tile_padded_coverage(city):
+    """Tiles inside the padded coverage box but outside the DEM extent are
+    served as edge-clamped continuation (never a flat-0 void), while tiles
+    beyond the padding 404."""
+    grid = datasets.load_city_dem(city.name)
+    z = 10
+    n = float(2**z)
+    width = 360.0 / n
+    # The tile immediately west of the DEM: entirely outside the DEM, but its
+    # east edge still sits inside the padded box, so it must be served.
+    x = int((grid.min_lng + 180.0) / 360.0 * n) - 1
+    pad_lng_min = grid.min_lng - (grid.max_lng - grid.min_lng) * terrain_tiles.PAD_FRAC
+    assert (x + 1) * width - 180.0 <= grid.min_lng  # fully outside the DEM
+    assert (x + 1) * width - 180.0 > pad_lng_min  # but inside the padding
+    lat = (grid.min_lat + grid.max_lat) / 2.0
+    py = (1.0 - math.asinh(math.tan(math.radians(lat))) / math.pi) / 2.0 * n
+    y = int(py)
+    data = terrain_tiles.tile(city.name, z, x, y)
+    assert data is not None
+    w, h, (_, rgb) = decode_png_rgb(data)
+    assert (w, h) == (terrain_tiles.TILE, terrain_tiles.TILE)
+    # centre pixel matches the (edge-clamped) direct sample exactly
+    c = terrain_tiles.TILE // 2
+    cx = _tile_pixel_lng(*terrain_tiles.tile_bbox(z, x, y)[::2], c)
+    cy = _tile_pixel_lat(z, y, c)
+    expected = float(
+        terrain_tiles._sample(grid, np.array([cx]), np.array([cy]))[0]
+    )
+    got = _decode_elev(rgb, c, c)
+    assert abs(got - expected) < 1.0
+    # fully outside the padded box: no coverage
+    assert terrain_tiles.tile(city.name, z, 0, 0) is None

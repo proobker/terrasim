@@ -2,6 +2,31 @@
 
 Status ledger for terrasim. Most recent at the top. `plans.md` is the spec; this file records what physically exists and what was verified.
 
+## 2026-09-12 — Fix: flat terrain/3D chunks at the map edges
+
+**Why**: after real footprints shipped, the city view showed flat regions mixed with properly-elevated ones. Two frontend causes, both in `MapView.tsx`:
+
+1. **DEM `bounds` mismatch** — the raster-dem source was constrained to `city.bounds` (the dense urban-core box) while the camera fits `city.hazard_bounds` (the wider valley theatre = the DEM grid). MapLibre never requests terrain tiles outside the source `bounds`, so the outer valley floor rendered with no mesh → flat terrain chunks around the viewport. Fix: both `applyTerrain()` call sites pass `city.hazard_bounds ?? city.bounds`.
+2. **Stale render-to-texture (RTT) terrain composites** — with terrain active, MapLibre renders each tile to a cached texture; fill-extrusion data that lands *after* that composite (buildings fetch, band tints, moved planning assets) leaves some tiles flat until an interaction churns the cache (maplibre-gl#3001). Fix: new `refreshTerrainRTT(map)` helper (`map.terrain.tileManager.releaseAllRTT()` + `map.triggerRepaint()`, both public in 6.9.0) fired after the city-load `Promise.all` settles, on `moveend` of the initial `fitBounds`, after band/asset `setData`, and when toggling `3D terrain` on.
+
+**Verified live.** `npx tsc --noEmit -p tsconfig.app.json` and `npm run build` pass. Terrain tiles z11–13 across the Kathmandu hazard box confirmed non-flat and all served (backend was healthy; this was client-side).
+
+## 2026-09-12 — Real building footprints replace centroid squares
+
+**Why**: the 3D city was synthetic — `out center` fetches gave centroid **Point** buildings and `buildBlockFeatures()` drew placeholder squares around them. plans.md §10 asks for actual OSM footprints; the map now renders real building shapes as `fill-extrusion`, heights still estimated.
+
+**Backend (`scripts/fetch_data.py`).**
+- Buildings fetch switched from `out center 4000` (centroids) to `out geom 3000` on an independent 3×3 chunk grid (9 tiny chunks → mirrors return full rings; small chunks are the codebase's own remedy for `out geom` geometry degradation).
+- Buildings `to_features` now emits Polygon geometry (`geom_attr="geometry"`, `keep_lines=False`); the dormant `filter_buildings()` is wired in to drop slivers (<40 m²) and degenerate 2-point ways before the 4500 largest-first cap.
+
+**Frontend.**
+- `buildings3d.ts`: `buildBlockFeatures()` passes real Polygon rings straight through as the extrusion footprint (MultiPolygon → first polygon); the centroid-square generation stays only as a fallback for legacy point bundles. `estimateHeight()` untouched — heights remain *estimated* (OSM `height` → `building:levels` → type table, clamp 3–60 m). Hash colours, `applyBands()` tinting and the "~N m est." hover are unchanged.
+- `SidePanel.tsx`: infrastructure toggle now reads "3D buildings".
+
+**Data.** kathmandu bundle rebuilt: `buildings.geojson` = 4500 Polygon features (mean ring 6.8 pts; 3 with `height`, 328 with `building:levels`). pokhara not rebuilt (deferred).
+
+**Verified live.** `uv run pytest` 32 passed. `npx tsc --noEmit -p tsconfig.app.json` and `npm run build` pass. `/api/cities/kathmandu/layers/buildings` serves 4500 Polygons; the map renders real footprints under the FireRed raster treatment, and sim bands still tint exposed blocks by OSM id.
+
 ## 2026-09-12 — Valley-wide theatre + stylised 3D city blocks
 
 **Why**: the demo map read as a flat plan-view grid. Now hazards trace the real Kathmandu valley basin (wider DEM grid, overlays clipped to the lowland) and the city reads as a blocky toy-city: every building is a stylised 3D block with estimated height, and a sim run tints exposed blocks in band colours.
