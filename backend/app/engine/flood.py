@@ -1,31 +1,39 @@
-"""Flow-routed hypothetical flood extent.
+"""Volume-conserving, transient, tributary-aware hypothetical flood model.
 
-This is deliberately NOT a hydrodynamic model. It computes the set of
-raster cells that (a) are hydrologically connected to a user-supplied
-source (a clicked cell or a whole river channel) and (b) lie below a
-modelled water surface. See plans.md §8.
+This is deliberately NOT a hydrodynamic model. It routes a hypothetical
+flood *volume* through the terrain as a simplified flood wave, so the
+results are directional (water travels downstream over simulated time),
+volume-limited (a given rise carries a given amount of water, nothing
+more), and specific to the chosen river and its tributaries.
 
-The water surface is flow-aware, not a single flat level:
+What the model tracks:
 
-- A D8 steepest-descent direction raster is derived from the DEM; water
-  leaves the source along the downhill flow path and ponds where the
-  terrain opens up below the carried water surface.
-- For a river source, the modelled surface rises by ``level_m`` above the
-  *local* channel bed (a smoothed grade line) rather than above the
-  channel's lowest point, so water follows the run of the river and
-  different rivers produce genuinely different extents.
-- Spreading ponds use the highest incoming water surface (max-wins), so
-  connected low ground fills to a common level while higher ground stays
-  dry.
+- **Direction of flow**: every cell gets a D8 steepest-descent direction
+  from the DEM. Water moves from cell to cell along the flow network and
+  spreads laterally only through shared lower ground.
+- **Volume conservation**: the flood starts as an injected hydrograph
+  volume, and the routing step moves water between cells while preserving
+  the total. A ``rise_m`` is converted into a conserved volume derived
+  from the reach geometry (length x assumed inundation width), so longer
+  rivers carry more water and floodplains only fill until the volume is
+  spent.
+- **Transient wave**: inflow is released over simulated time (a
+  triangular hydrograph), peaking early and decaying; each cell floods
+  when the wave front reaches it, so upstream floods first and the flood
+  extends downstream over time. The reported extent is the *peak* state
+  over the whole simulation.
+- **Tributaries**: any other mapped waterline whose basin drains into the
+  chosen river contributes its own volume, lagged by its distance to the
+  junction — so tributary-fed floods arrive later and add water.
 
-Limitations kept explicit: no rainfall, discharge, flow velocity, channel
-hydraulics, drainage networks, infiltration or time-dependence. Treat the
-output as a *terrain-based hypothetical flood extent*, never a prediction.
+Limitations kept explicit: no rainfall-runoff, evaporation, infiltration,
+channel cross-sections, hydraulic structures, erosion, or true velocity;
+the routing is a simplified flux transfer capped for numerical stability.
+Treat the output as a *terrain-based hypothetical flood extent*, never a
+prediction. See plans.md §8.
 """
 
 from __future__ import annotations
-
-import heapq
 
 import numpy as np
 
@@ -39,6 +47,15 @@ _NEIGH8 = (
 )
 
 _EPS = 1e-6
+_DEPTH_EPS = 1e-3  # a cell counts as flooded once it holds this much water (m)
+
+# Model tuning (hypothetical, not calibrated):
+_CHANNEL_WIDTH_CELLS = 2.0  # assumed inundation width (in cells) above a reach
+_TRIBUTARY_FACTOR = 0.5     # tributary volume vs an equal-length main reach
+_SLOPE_STEPS_PER_CELL = 3   # sim steps for the wave to advance one grid cell
+_MIN_STEPS = 120
+_MAX_STEPS = 700
+_FLUX_FRACTION = 0.22       # max head-driven depth fraction moved per step
 
 
 def _d8_flow_dir(elev: np.ndarray) -> np.ndarray:
@@ -62,29 +79,58 @@ def _d8_flow_dir(elev: np.ndarray) -> np.ndarray:
     return flow
 
 
-def _local_min_disk(elev: np.ndarray, radius: int = 2) -> np.ndarray:
-    """Morphological minimum over a small disk (grade-following channel bed).
+def _upstream_catchment(
+    elev: np.ndarray, flow: np.ndarray, seeds: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return (network distance to seed, contributing-catchment mask).
 
-    A single spurious high vertex (bridge, sampling artifact) must not
-    locally prop up the water surface and split a reach, so the channel
-    "bed" used for the graded surface is the local minimum rather than the
-    raw elevation. Radius 2 spans roughly one DEM cell-pair.
+    A cell belongs to the catchment when its D8 downstream path reaches a
+    seed cell. ``dist`` is the number of flow steps each cell needs to
+    reach the nearest seed — used to lag tributary inflows by their
+    distance to the junction. One top-down pass is enough because D8
+    strictly descends: every cell is processed after its downstream
+    neighbour.
     """
     h, w = elev.shape
-    padded = np.pad(elev, radius, mode="edge")
-    out = np.full((h, w), np.inf)
-    r2 = radius * radius
-    for dr in range(-radius, radius + 1):
-        for dc in range(-radius, radius + 1):
-            if dr * dr + dc * dc > r2:
-                continue
-            win = padded[radius + dr : radius + dr + h, radius + dc : radius + dc + w]
-            out = np.minimum(out, win)
-    return out
+    dist = np.full((h, w), np.inf)
+    dist[seeds] = 0.0
+    order = np.argsort(elev.ravel())  # lowest first: downstream resolves before upstream
+    for idx in order:
+        r, c = divmod(int(idx), w)
+        code = int(flow[r, c])
+        if code < 0:
+            continue
+        dr, dc = _NEIGH8[code]
+        nr, nc = r + dr, c + dc
+        if dist[nr, nc] + 1.0 < dist[r, c]:
+            dist[r, c] = dist[nr, nc] + 1.0
+    return dist, np.isfinite(dist)
+
+
+def _flow_accumulation(elev: np.ndarray, flow: np.ndarray) -> np.ndarray:
+    """D8 flow accumulation: how many cells drain through each cell.
+
+    Used to weight inflows toward headwater reaches, so a rise sends more
+    water where the river's own basin is deep. One top-down pass suffices
+    (D8 strictly descends).
+    """
+    h, w = elev.shape
+    acc = np.ones(elev.shape, dtype=np.float64)
+    order = np.argsort(elev.ravel())[::-1]
+    for idx in order:
+        r, c = divmod(int(idx), w)
+        code = int(flow[r, c])
+        if code < 0:
+            continue
+        dr, dc = _NEIGH8[code]
+        nr, nc = r + dr, c + dc
+        acc[nr, nc] += acc[r, c]
+    return acc
 
 
 def _channel_seeds(grid: DemGrid, coords: list[tuple[float, float]]) -> np.ndarray:
     """Rasterize a river polyline into a continuous 4-connected seed mask."""
+    h, w = grid.elev.shape
     seed = np.zeros(grid.elev.shape, dtype=bool)
     cells = [grid.cell(lng, lat) for lng, lat in coords]
     if not cells:
@@ -103,89 +149,278 @@ def _channel_seeds(grid: DemGrid, coords: list[tuple[float, float]]) -> np.ndarr
                 err -= dc_abs
                 r += sr
             if e2 < dr_abs:
-                err += dr_abs
+                err += dc_abs
                 c += sc
-            seed[r, c] = True
+            if (r - r1) * sr > 0:
+                r = r1
+            if (c - c1) * sc > 0:
+                c = c1
+            if 0 <= r < h and 0 <= c < w:
+                seed[r, c] = True
     return seed
 
 
-def _surface_seed(
+def _all_water_seeds(
+    grid: DemGrid, water_features: list[dict] | None
+) -> np.ndarray | None:
+    """Rasterize every waterway in a FeatureCollection into a union mask."""
+    if not water_features:
+        return None
+    union = np.zeros(grid.elev.shape, dtype=bool)
+    for feature in water_features:
+        geometry = feature.get("geometry") if isinstance(feature, dict) else None
+        if not geometry:
+            continue
+        coords = _line_coords(geometry)
+        if coords:
+            union |= _channel_seeds(grid, coords)
+    return union
+
+
+def _line_coords(geometry: dict) -> list[tuple[float, float]]:
+    """Flatten LineString/MultiLineString/Polygon geometry into (lng, lat)."""
+    coords = geometry.get("coordinates") or []
+    gtype = geometry.get("type")
+    if gtype == "LineString":
+        return [(p[0], p[1]) for p in coords]
+    if gtype == "MultiLineString":
+        return [(p[0], p[1]) for part in coords for p in part]
+    if gtype == "Polygon":
+        return [(p[0], p[1]) for ring in coords for p in ring]
+    return []
+
+
+def _inflow_plan(
+    grid: DemGrid,
     elev: np.ndarray,
     flow: np.ndarray,
-    seeds: np.ndarray,
-    seed_surface: np.ndarray,
-) -> np.ndarray:
-    """Carry the water surface downstream along the D8 flow path.
+    main_seeds: np.ndarray,
+    all_water: np.ndarray | None,
+    level_m: float,
+    mode: str,
+    use_catchment: bool = True,
+) -> dict | None:
+    """Translate a rise into a conserved per-cell inflow plan.
 
-    Every seed cell's modelled surface is walked downstream through the
-    flow-direction network; a downstream cell inherits the water surface of
-    the cell that drains into it whenever the terrain there is below that
-    surface. This is the "direction of flow" backbone of the model: water
-    reaches the river's outlet corridor even where the ridgeline would be
-    ambiguous.
+    Returns None (dry) when there is nowhere for the water to go. The plan
+    carries, for every inflow cell, its total depth assignment ``d_cell``
+    and the simulation step ``start`` at which its share begins to flow —
+    river cells start immediately, tributaries lag by their distance to
+    the river, and geo-referenced water bodies inject at once.
     """
-    surf = seed_surface.astype(float).copy()
-    # A seed only holds water when its own terrain is at or below its surface
-    # (e.g. an absolute level below a dry reach must not seed that reach).
-    surf[elev > surf] = -np.inf
-    stack = list(map(tuple, np.argwhere(seeds)))
-    nrows, ncols = elev.shape
-    while stack:
-        r, c = stack.pop()
+    cell_area = grid.cell_area_m2((grid.min_lat + grid.max_lat) / 2.0)
+    h, w = elev.shape
+    n_steps = _MIN_STEPS
+
+    if mode == "absolute":
+        d_cell = np.maximum(0.0, float(level_m) - elev).astype(np.float32)
+        inflow_mask = d_cell > _DEPTH_EPS
+        if not inflow_mask.any():
+            return None
+        starts = np.zeros((h, w), dtype=np.int64)
+        window = min(40, n_steps // 3)
+        source_volume = float((d_cell * cell_area).sum())
+        tributaries = 0
+        return {
+            "inflow_mask": inflow_mask,
+            "d_cell": d_cell,
+            "starts": starts,
+            "window": window,
+            "n_steps": n_steps,
+            "volume_m3": source_volume,
+            "peak_step_m3": source_volume,
+            "tributaries": tributaries,
+        }
+
+    if not use_catchment:
+        inflow_mask = main_seeds.copy()
+    else:
+        dist, catchment = _upstream_catchment(elev, flow, main_seeds)
+        inflow_mask = main_seeds.copy()
+        if all_water is not None:
+            inflow_mask |= catchment & all_water
+    trib_mask = inflow_mask & ~main_seeds
+
+    reach_cells = int(main_seeds.sum())
+    if reach_cells == 0:
+        return None
+    n_steps = int(min(max(reach_cells * _SLOPE_STEPS_PER_CELL, _MIN_STEPS), _MAX_STEPS))
+    window = max(5, n_steps // 3)
+
+    n_main = int(main_seeds.sum())
+    n_trib = int(trib_mask.sum())
+    volume = float(level_m) * cell_area * _CHANNEL_WIDTH_CELLS * (n_main + n_trib * _TRIBUTARY_FACTOR)
+    if volume <= 0.0:
+        return None
+
+    if use_catchment:
+        acc = _flow_accumulation(elev, flow)
+        weight = np.where(trib_mask, acc * _TRIBUTARY_FACTOR, acc)
+    else:
+        acc = np.ones(elev.shape, dtype=np.float64)
+        weight = acc
+    weight = np.where(inflow_mask, weight, 0.0)
+    total_weight = float(weight.sum())
+    if total_weight <= 0.0:
+        return None
+    share = weight / total_weight
+
+    d_cell = (share * volume / cell_area).astype(np.float32)
+    if use_catchment:
+        lag = np.full((h, w), n_steps, dtype=np.int64)
+        finite = np.isfinite(dist)
+        if finite.any():
+            lag[finite] = np.clip(
+                (dist[finite] * _SLOPE_STEPS_PER_CELL).astype(np.int64), 0, n_steps - window
+            )
+        starts = lag.copy()
+    else:
+        starts = np.zeros((h, w), dtype=np.int64)
+        starts[inflow_mask] = 0
+        starts[~inflow_mask] = n_steps
+
+    peak_step_rate = volume * (3.0 / window) * 0.5
+    return {
+        "inflow_mask": inflow_mask,
+        "d_cell": d_cell,
+        "starts": starts,
+        "window": window,
+        "n_steps": n_steps,
+        "volume_m3": float(volume),
+        "peak_step_m3": peak_step_rate,
+        "tributaries": n_trib if all_water is not None else 0,
+        "reach_cells": reach_cells,
+    }
+
+
+def _flux_ca_step(elev: np.ndarray, depth: np.ndarray) -> np.ndarray:
+    """Move one timestep of water volume between neighbouring cells.
+
+    Head-driven flux (water goes to lower or flooded neighbours), clipped
+    so a cell never exports more than it holds — the routing conserves
+    volume. Cells on the DEM edge face an infinitely high wall (padded
+    elevation ``+inf``) and therefore never leak off the grid.
+    """
+    h, w = elev.shape
+    stage = elev + depth
+    pad = np.full((h + 2, w + 2), np.inf, dtype=np.float32)
+    pad[1:-1, 1:-1] = stage
+
+    out = np.zeros((h, w), dtype=np.float32)
+    heads = []
+    for dr, dc in _NEIGH8:
+        sn = pad[1 + dr : 1 + dr + h, 1 + dc : 1 + dc + w]
+        heads.append(np.maximum(stage - sn, 0.0))
+
+    available = depth / 8.0
+    scale_denom = np.zeros((h, w), dtype=np.float32)
+    for head in heads:
+        scale_denom += np.minimum(_FLUX_FRACTION * head, available)
+    scale = np.minimum(1.0, depth / np.maximum(scale_denom, _EPS))
+
+    gain = np.zeros((h + 2, w + 2), dtype=np.float32)
+    for code, (dr, dc) in enumerate(_NEIGH8):
+        flux = np.minimum(_FLUX_FRACTION * heads[code], available) * scale
+        out += flux
+        gain[1 + dr : 1 + dr + h, 1 + dc : 1 + dc + w] += flux
+    return depth - out + gain[1:-1, 1:-1]
+
+
+def _dilate8(mask: np.ndarray) -> np.ndarray:
+    """Dilate a boolean mask by one 8-connected cell."""
+    h, w = mask.shape
+    padded = np.pad(mask, 1, mode="constant")
+    out = mask.copy()
+    for dr, dc in _NEIGH8:
+        out |= padded[1 + dr : 1 + dr + h, 1 + dc : 1 + dc + w]
+    return out
+
+
+def _flux_domain(
+    elev: np.ndarray, flow: np.ndarray, inflow_mask: np.ndarray, margin: int = 6
+) -> np.ndarray:
+    """Cells the flood wave can reach.
+
+    The union of the D8 upstream closure (tributary basin) and the
+    downstream closure (every cell the wave itself can travel to along the
+    flow network), dilated by ``margin`` cells so stage-driven spreading
+    onto the floodplain is not cut off. The flux simulation runs only
+    inside the box that bounds this domain, keeping the cost proportional
+    to the valley rather than the whole DEM.
+    """
+    h, w = elev.shape
+    domain = inflow_mask.copy()
+    down = inflow_mask.copy()
+    order_asc = np.argsort(elev.ravel())  # lowest first: propagate downstream
+    for idx in order_asc:
+        r, c = divmod(int(idx), w)
+        code = int(flow[r, c])
+        if code < 0 or not down[r, c]:
+            continue
+        dr, dc = _NEIGH8[code]
+        down[r + dr, c + dc] = True
+    order_desc = order_asc[::-1]  # highest first: propagate upstream
+    for idx in order_desc:
+        r, c = divmod(int(idx), w)
         code = int(flow[r, c])
         if code < 0:
             continue
         dr, dc = _NEIGH8[code]
-        nr, nc = r + dr, c + dc
-        if not (0 <= nr < nrows and 0 <= nc < ncols):
-            continue
-        s = surf[r, c]
-        if elev[nr, nc] <= s + _EPS and s > surf[nr, nc] + _EPS:
-            surf[nr, nc] = s
-            stack.append((nr, nc))
-    return surf
+        if not domain[r, c] and domain[r + dr, c + dc]:
+            domain[r, c] = True
+    domain |= down
+    for _ in range(margin):
+        domain = _dilate8(domain)
+    return domain
 
 
-def _pond_fill(elev: np.ndarray, surf: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Spread standing water across connected low ground below the surface.
-
-    A priority fill ordered by the highest incoming water surface (max-wins):
-    a cell floods when its terrain is at or below the peak surface reaching
-    it, and where two ponds merge the higher surface governs. This is the
-    ponding half of the model — overtopped banks backfill their floodplain
-    at the local (graded) water level.
-    """
-    started = surf > -np.inf
-    if not started.any():
-        return started, surf
-    pq = [(-surf[r, c], int(r), int(c)) for r, c in np.argwhere(started)]
-    heapq.heapify(pq)
-    nrows, ncols = elev.shape
-    while pq:
-        neg_s, r, c = heapq.heappop(pq)
-        s = -neg_s
-        if s < surf[r, c] - _EPS:
-            continue
-        r0, r1 = max(0, r - 1), min(nrows, r + 2)
-        c0, c1 = max(0, c - 1), min(ncols, c + 2)
-        for nr in range(r0, r1):
-            for nc in range(c0, c1):
-                if nr == r and nc == c:
-                    continue
-                if s > surf[nr, nc] + _EPS and elev[nr, nc] <= s + _EPS:
-                    surf[nr, nc] = s
-                    heapq.heappush(pq, (-s, nr, nc))
-    return surf > -np.inf, surf
-
-
-def _flow_route(
-    grid: DemGrid, seeds: np.ndarray, seed_surface: np.ndarray
+def _flux_simulate(
+    elev: np.ndarray,
+    flow: np.ndarray,
+    plan: dict,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Return (flooded mask, per-cell water-surface raster)."""
-    elev = grid.elev
-    flow = _d8_flow_dir(elev)
-    surf = _surface_seed(elev, flow, seeds, seed_surface)
-    return _pond_fill(elev, surf)
+    """Run the hydrograph through the flux router; return (peak_mask, surface).
+
+    ``surface`` is the peak water-surface raster (elevation + peak depth).
+    The router operates on a sub-grid bounded by the reachable domain
+    (D8 network plus a lateral margin), keeping the cost proportional to
+    the valley rather than the whole DEM.
+    """
+    inflow = plan["inflow_mask"]
+    d_cell = plan["d_cell"]
+    starts = plan["starts"]
+    window = plan["window"]
+    n_steps = plan["n_steps"]
+    factor = 3.0 / window
+
+    domain = _flux_domain(elev, flow, inflow, margin=12)
+    rows, cols = np.argwhere(domain).T
+    if rows.size == 0:
+        return np.zeros_like(elev, dtype=bool), elev.astype(np.float32)
+    r0, r1 = int(rows.min()), int(rows.max()) + 1
+    c0, c1 = int(cols.min()), int(cols.max()) + 1
+
+    elev_f = elev.astype(np.float32)
+    elev_s = elev_f[r0:r1, c0:c1]
+    d_cell = np.ascontiguousarray(d_cell[r0:r1, c0:c1])
+    starts = np.ascontiguousarray(starts[r0:r1, c0:c1].astype(np.int64))
+
+    depth = np.zeros(elev_s.shape, dtype=np.float32)
+    peak = np.zeros(elev_s.shape, dtype=np.float32)
+    for t in range(n_steps):
+        active = (starts <= t) & (t < starts + window)
+        if active.any():
+            u = np.clip((t - starts) / window, 0.0, 1.0)
+            shape = factor * (2.0 * u - 2.0 * u * u)
+            depth += np.where(active, d_cell * shape, np.float32(0.0))
+        depth = _flux_ca_step(elev_s, depth)
+        peak = np.maximum(peak, depth)
+
+    surface = elev_f.copy()
+    surface[r0:r1, c0:c1] = elev_s + peak
+    mask = np.zeros_like(elev, dtype=bool)
+    mask[r0:r1, c0:c1] = peak > _DEPTH_EPS
+    return mask, surface
 
 
 def flood_mask(
@@ -194,37 +429,27 @@ def flood_mask(
     source_lat: float,
     level_m: float,
     mode: str = "rise",
-) -> tuple[np.ndarray, float | None]:
-    """Compute the flow-routed flooded-cell mask from a clicked source cell.
+) -> tuple[np.ndarray, np.ndarray | None]:
+    """Compute the flooded-cell mask from a point source.
 
-    Args:
-        grid: elevation raster + georeferencing.
-        source_lng/source_lat: flood origin (usually a river/water body).
-        level_m: either an absolute water-surface elevation (meters above
-            sea level) when ``mode == "absolute"``, or a rise above the
-            source cell's elevation when ``mode == "rise"``.
-        mode: ``"rise"`` or ``"absolute"``.
-
-    Returns:
-        (flooded mask, peak modelled water surface in meters or None if dry).
+    Returns (mask, peak water-surface raster or None when nothing floods).
+    In ``rise`` mode the point source releases a conserved volume equal to
+    the rise above the source cell's terrain at a one-cell inlet; in
+    ``absolute`` mode the volume is the water below ``level_m`` above sea
+    level.
     """
     elev = grid.elev
     r0, c0 = grid.cell(source_lng, source_lat)
-    if mode == "absolute":
-        s0 = float(level_m)
-        if elev[r0, c0] > s0:
-            return np.zeros_like(elev, dtype=bool), None
-    else:
-        s0 = float(elev[r0, c0]) + float(level_m)
-
     seeds = np.zeros_like(elev, dtype=bool)
     seeds[r0, c0] = True
-    seed_surface = np.full(elev.shape, -np.inf)
-    seed_surface[r0, c0] = s0
-    mask, surf = _flow_route(grid, seeds, seed_surface)
+    flow = _d8_flow_dir(elev)
+    plan = _inflow_plan(grid, elev, flow, seeds, None, level_m, mode, use_catchment=False)
+    if plan is None:
+        return np.zeros_like(elev, dtype=bool), None
+    mask, surface = _flux_simulate(elev, flow, plan)
     if not mask.any():
         return mask, None
-    return mask, float(surf[mask].max())
+    return mask, surface
 
 
 def river_flood_mask(
@@ -232,46 +457,28 @@ def river_flood_mask(
     coords: list[tuple[float, float]],
     level_m: float,
     mode: str = "rise",
-) -> tuple[np.ndarray, float | None]:
-    """Compute the flow-routed flooded mask seeded along a river channel.
+    water_features: list[dict] | None = None,
+) -> tuple[np.ndarray, np.ndarray | None]:
+    """Compute the flooded mask seeded along a river channel.
 
-    Every cell the river line crosses becomes a flood seed, so the modelled
-    water rises out of the whole channel. For ``mode == "rise"`` the water
-    surface follows the river's own grade line: each reach is hypothesized
-    to rise by ``level_m`` meters *above its local channel bed*, so upstream
-    and downstream reaches flood independently instead of sharing one flat
-    level. Water is then routed downstream along the D8 flow path and ponds
-    in connected low ground. For ``"absolute"`` the surface is ``level_m``
-    meters above sea level (flat), as before.
-
-    Args:
-        grid: elevation raster + georeferencing.
-        coords: river line vertices as ``(lng, lat)`` pairs.
-        level_m: absolute water-surface elevation (meters above sea level)
-            when ``mode == "absolute"``, or the hypothesized rise in meters
-            above each reach's local channel bed when ``mode == "rise"``.
-        mode: ``"rise"`` or ``"absolute"``.
-
-    Returns:
-        (flooded mask, peak modelled water surface in meters or None when no
-        river cell falls inside the DEM coverage / nothing floods).
+    Every cell the river line crosses is an inflow cell. When
+    ``water_features`` (a GeoJSON FeatureCollection) is supplied, its
+    waterlines inside the river's contributing basin add volume as
+    tributaries. Returns (mask, peak water-surface raster or None).
     """
     elev = grid.elev
     seeds = _channel_seeds(grid, coords)
     if not seeds.any():
         return seeds, None
-
-    seed_surface = np.full(elev.shape, -np.inf)
-    if mode == "absolute":
-        seed_surface[seeds] = float(level_m)
-    else:
-        bed = _local_min_disk(elev)
-        seed_surface[seeds] = bed[seeds] + float(level_m)
-
-    mask, surf = _flow_route(grid, seeds, seed_surface)
+    all_water = _all_water_seeds(grid, water_features)
+    flow = _d8_flow_dir(elev)
+    plan = _inflow_plan(grid, elev, flow, seeds, all_water, level_m, mode)
+    if plan is None:
+        return np.zeros_like(elev, dtype=bool), None
+    mask, surface = _flux_simulate(elev, flow, plan)
     if not mask.any():
         return mask, None
-    return mask, float(surf[mask].max())
+    return mask, surface
 
 
 def flood_stats(
@@ -279,14 +486,14 @@ def flood_stats(
     mask: np.ndarray,
     surface: float,
     surface_raster: np.ndarray | None = None,
+    extra: dict | None = None,
 ) -> dict:
     """Aggregate flood extents and depths.
 
     ``surface`` is the peak modelled water surface (reported as the
     scenario's ``water_surface_m``). When ``surface_raster`` is supplied,
-    per-cell depth is ``surface_raster - elevation`` so a graded surface
-    yields correct depth bands along the river; otherwise depth falls back
-    to a flat surface.
+    per-cell depth is ``surface_raster - elevation`` so the graded, routed
+    surface yields correct depth bands along the river.
     """
     cells = int(mask.sum())
     area_m2 = cells * grid.cell_area_m2((grid.min_lat + grid.max_lat) / 2.0)
@@ -295,7 +502,7 @@ def flood_stats(
     else:
         depths = np.where(mask, surface - grid.elev, 0.0)
     deep_mask = depths >= DEPTH_CORE_M
-    return {
+    stats = {
         "cells_flooded": cells,
         "cell_resolution_m": grid.res_lat * 111.32 * 1000,
         "water_surface_m": surface,
@@ -305,6 +512,9 @@ def flood_stats(
         "area_km2": round(area_m2 / 1e6, 3),
         "percent_of_cells": round(100.0 * mask.mean(), 2),
     }
+    if extra:
+        stats.update(extra)
+    return stats
 
 
 DEPTH_CORE_M = 1.0
@@ -316,10 +526,9 @@ def flood_to_featurecollections(
     """Return rendered flood overlay GeoJSON.
 
     ``surface`` enables the deeper ``flood-deep`` band (cells at least
-    ``DEPTH_CORE_M`` below the modelled water surface) so the modelled water
-    reads as a pond with a darker core instead of a flat translucent sheet.
-    Accepts either a flat surface (float) or a per-cell surface raster
-    (ndarray) for graded depths.
+    ``DEPTH_CORE_M`` below the peak water surface) so the modelled water
+    reads as a pond with a darker core. Accepts a flat surface (float) or
+    a per-cell peak surface raster (ndarray).
     """
     features = [
         {"type": "Feature", "properties": {"class": "flood"}, "geometry": polygon}
@@ -346,36 +555,70 @@ def flood_to_featurecollections(
     }
 
 
-def _result(grid: DemGrid, mask: np.ndarray, surface_raster: np.ndarray | None = None) -> dict:
-    if surface_raster is None or not mask.any():
-        return {
-            "dry": True,
-            "flooded": {"type": "FeatureCollection", "features": []},
-            "stats": {"cells_flooded": 0, "area_km2": 0.0, "percent_of_cells": 0.0, "max_depth_m": 0.0},
-        }
-    surface = float(surface_raster[mask].max())
-    layers = flood_to_featurecollections(grid, mask, surface_raster)
-    stats = flood_stats(grid, mask, surface, surface_raster)
+def _time_stats(grid: DemGrid, plan: dict) -> dict:
+    """Hypothetical wave timings: steps, modelled hours, peak discharge."""
+    cell_m = grid.res_lat * 111.32 * 1000
+    dt_s = cell_m / (0.8 * _SLOPE_STEPS_PER_CELL)  # assume ~0.8 m/s flow
     return {
-        "dry": False,
-        "flooded": layers,
-        "stats": stats,
+        "sim_steps": plan["n_steps"],
+        "sim_hours": round(plan["n_steps"] * dt_s / 3600.0, 2),
+        "peak_discharge_m3s": round(plan["peak_step_m3"] / dt_s, 1),
+    }
+
+
+def _result(
+    grid: DemGrid,
+    mask: np.ndarray,
+    surface_raster: np.ndarray | None = None,
+    plan: dict | None = None,
+) -> dict:
+    """Assemble the flood result dict (also carries the raw mask for reuse)."""
+    if mask.any() and surface_raster is not None and plan is not None:
+        surface = float(surface_raster[mask].max())
+        layers = flood_to_featurecollections(grid, mask, surface_raster)
+        extra = {
+            "volume_m3": round(plan["volume_m3"], 1),
+            "tributaries": int(plan.get("tributaries", 0)),
+            "reach_cells": int(plan.get("reach_cells", 0)),
+        }
+        extra.update(_time_stats(grid, plan))
+        stats = flood_stats(grid, mask, surface, surface_raster, extra)
+        return {
+            "dry": False,
+            "flooded": layers,
+            "stats": stats,
+            "mask": mask,
+        }
+    return {
+        "dry": True,
+        "flooded": {"type": "FeatureCollection", "features": []},
+        "stats": {
+            "cells_flooded": 0,
+            "area_km2": 0.0,
+            "percent_of_cells": 0.0,
+            "max_depth_m": 0.0,
+            "volume_m3": 0.0,
+            "tributaries": 0,
+            "reach_cells": 0,
+            "sim_steps": 0,
+            "sim_hours": 0.0,
+            "peak_discharge_m3s": 0.0,
+        },
+        "mask": np.zeros_like(grid.elev, dtype=bool),
     }
 
 
 def run(grid: DemGrid, source_lng: float, source_lat: float, level_m: float, mode: str) -> dict:
-    mask, _ = flood_mask(grid, source_lng, source_lat, level_m, mode)
-    if not mask.any():
-        return _result(grid, mask)
     elev = grid.elev
     r0, c0 = grid.cell(source_lng, source_lat)
-    s0 = float(elev[r0, c0]) + float(level_m) if mode == "rise" else float(level_m)
     seeds = np.zeros_like(elev, dtype=bool)
     seeds[r0, c0] = True
-    seed_surface = np.full(elev.shape, -np.inf)
-    seed_surface[r0, c0] = s0
-    _, surf = _flow_route(grid, seeds, seed_surface)
-    return _result(grid, mask, surf)
+    flow = _d8_flow_dir(elev)
+    plan = _inflow_plan(grid, elev, flow, seeds, None, level_m, mode, use_catchment=False)
+    if plan is None:
+        return _result(grid, np.zeros_like(elev, dtype=bool), None, None)
+    mask, surface = _flux_simulate(elev, flow, plan)
+    return _result(grid, mask, surface, plan)
 
 
 def run_river(
@@ -383,17 +626,16 @@ def run_river(
     coords: list[tuple[float, float]],
     level_m: float,
     mode: str = "rise",
+    water_features: list[dict] | None = None,
 ) -> dict:
-    mask, _ = river_flood_mask(grid, coords, level_m, mode)
-    if not mask.any():
-        return _result(grid, mask)
     elev = grid.elev
     seeds = _channel_seeds(grid, coords)
-    seed_surface = np.full(elev.shape, -np.inf)
-    if mode == "absolute":
-        seed_surface[seeds] = float(level_m)
-    else:
-        bed = _local_min_disk(elev)
-        seed_surface[seeds] = bed[seeds] + float(level_m)
-    _, surf = _flow_route(grid, seeds, seed_surface)
-    return _result(grid, mask, surf)
+    if not seeds.any():
+        return _result(grid, np.zeros_like(elev, dtype=bool), None, None)
+    all_water = _all_water_seeds(grid, water_features)
+    flow = _d8_flow_dir(elev)
+    plan = _inflow_plan(grid, elev, flow, seeds, all_water, level_m, mode)
+    if plan is None:
+        return _result(grid, np.zeros_like(elev, dtype=bool), None, None)
+    mask, surface = _flux_simulate(elev, flow, plan)
+    return _result(grid, mask, surface, plan)

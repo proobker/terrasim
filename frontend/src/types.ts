@@ -70,6 +70,11 @@ export interface FloodStats {
   max_depth_m?: number;
   mean_depth_m?: number;
   deep_area_km2?: number;
+  volume_m3?: number;
+  sim_hours?: number;
+  peak_discharge_m3s?: number;
+  tributaries?: number;
+  reach_cells?: number;
 }
 
 export interface ExposedAsset {

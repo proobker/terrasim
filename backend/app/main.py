@@ -118,7 +118,13 @@ def simulate_flood(scenario: FloodScenario) -> dict:
         coords = datasets.line_vertices(geometry)
         if not coords:
             raise HTTPException(status_code=400, detail=f"river has no usable geometry: {scenario.river_id}")
-        result = flood.run_river(grid, coords, scenario.level_m, scenario.mode)
+        water_features = None
+        if scenario.include_tributaries:
+            try:
+                water_features = datasets.load_layer(scenario.city_id, "water").get("features") or None
+            except FileNotFoundError:
+                water_features = None
+        result = flood.run_river(grid, coords, scenario.level_m, scenario.mode, water_features)
     else:
         assert scenario.source is not None
         result = flood.run(
@@ -136,18 +142,7 @@ def simulate_flood(scenario: FloodScenario) -> dict:
         "dry": result["dry"],
     }
     if not result["dry"]:
-        if scenario.river_id is not None:
-            masked, _ = flood.river_flood_mask(grid, coords, scenario.level_m, scenario.mode)
-        else:
-            assert scenario.source is not None
-            masked, _ = flood.flood_mask(
-                grid,
-                scenario.source.lng,
-                scenario.source.lat,
-                scenario.level_m,
-                scenario.mode,
-            )
-        response["exposure"] = exposure.evaluate_flood_exposure(grid, assets, masked)
+        response["exposure"] = exposure.evaluate_flood_exposure(grid, assets, result["mask"])
     return response
 
 

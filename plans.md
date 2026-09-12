@@ -425,13 +425,16 @@ It does not automatically account for every factor such as:
 -   detailed channel hydraulics
 -   time-dependent water movement
 
-The flood engine is **flow-routed**: a D8 steepest-descent direction raster
-routes water downstream, and the modelled water surface for a river source
-rises by the user's level *above each reach's local channel bed* (a graded
-surface) rather than above a single flat level. Ponds backfill connected
-low ground below the carried surface. This makes the extent follow the
-selected river's flow path — different rivers, different extents — while
-remaining a deliberate simplification.
+The flood engine is **flow-routed and volume-conserving**: a D8
+steepest-descent direction raster routes water downhill, and a rise is
+converted into a conserved volume released as a transient triangular
+hydrograph over simulated hours. The wave travels along the selected
+river's flow path (upstream floods first), spills onto connected low
+ground until its volume is spent, and mapped waterlines whose basins drain
+into that river contribute volume as tributaries, lagged by their distance
+to the junction. Extent and depth are the peak state of the whole run;
+timings and peak discharge are hypothetical, derived from assumed flow
+speeds, never a forecast. Different rivers give different extents.
 
 Therefore, call it:
 

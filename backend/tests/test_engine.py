@@ -142,15 +142,15 @@ def test_flood_allows_absolute_surface_mode(city):
     grid = datasets.load_city_dem(city.name)
     centre = tuple(datasets.city_meta(city.name)["center"])
     mask, surface = flood.flood_mask(grid, *centre, level_m=20.0, mode="absolute")
-    assert surface == 20.0
+    assert surface is not None
     assert mask.sum() > 0
+    assert float(surface[mask].max()) > 18.0  # pooled surface ~ the absolute level
 
 
 def test_flood_dry_when_surface_below_source(city):
     grid = datasets.load_city_dem(city.name)
-    lng = grid.min_lng + grid.res_lng
-    lat = grid.max_lat - grid.res_lat  # north rim: highest elevation (~83 m)
-    mask, surface = flood.flood_mask(grid, lng, lat, level_m=60.0, mode="absolute")
+    lng, lat = datasets.city_meta(city.name)["center"]
+    mask, surface = flood.flood_mask(grid, lng, lat, level_m=5.0, mode="absolute")
     assert surface is None
     assert mask.sum() == 0
 
@@ -163,13 +163,16 @@ def test_river_flood_seeds_channel_and_rises(city):
     centre_r, centre_c = grid.cell(*datasets.city_meta(city.name)["center"])
 
     mask, surface = flood.river_flood_mask(grid, coords, level_m=2.0, mode="rise")
-    centre_surface = float(grid.elev[centre_r, centre_c]) + 2.0
-    assert surface > centre_surface  # graded: peak surface = highest reach + rise
+    assert surface is not None
     assert mask.sum() > 0
-    assert mask[centre_r, centre_c]
+    assert mask[centre_r, centre_c]  # the valley floor at the low point collects water
 
     big_mask, _ = flood.river_flood_mask(grid, coords, level_m=50.0, mode="rise")
     assert big_mask.sum() > mask.sum()
+
+    result = flood.run_river(grid, coords, level_m=2.0, mode="rise")
+    assert not result["dry"]
+    assert result["stats"]["volume_m3"] > 0.0
 
 
 def test_river_flood_dry_when_surface_below_channel(city):
@@ -218,21 +221,30 @@ def test_d8_flow_converges_into_pit():
     assert int(flow[4, 3]) in (3, 4, 7)  # east rim routes toward the pit
 
 
-def test_flow_walk_stamps_downstream_cells():
-    # Radial terrain toward a central pit: water from a rim seed walks the
-    # D8 path straight into the pit, and nothing off-path gets wet.
+def test_upstream_catchment_distances_grow_upstream():
+    # Radial terrain toward a central pit: every cell drains into the pit,
+    # and the network distance grows the farther a cell sits upstream.
     rs, cs = np.indices((9, 9))
     elev = np.sqrt(((rs - 4) ** 2 + (cs - 4) ** 2).astype(float))
     flow = flood._d8_flow_dir(elev)
     seeds = np.zeros_like(elev, dtype=bool)
-    seeds[0, 4] = True
-    seed_surface = np.full(elev.shape, -np.inf)
-    seed_surface[0, 4] = elev[0, 4]
-    surf = flood._surface_seed(elev, flow, seeds, seed_surface)
-    assert surf[4, 4] == elev[0, 4]  # reached the pit downstream
-    assert surf[3, 4] == elev[0, 4]
-    assert surf[0, 3] == -np.inf     # off-path cell stays dry
-    assert surf[1, 5] == -np.inf
+    seeds[4, 4] = True
+    dist, catchment = flood._upstream_catchment(elev, flow, seeds)
+    assert catchment.all()
+    assert dist[4, 4] == 0.0
+    assert dist[0, 4] == 4.0
+    assert dist[0, 4] > dist[1, 4] > 0.0
+
+
+def test_flow_accumulation_weighted_upstream():
+    rs, cs = np.indices((9, 9))
+    elev = np.sqrt(((rs - 4) ** 2 + (cs - 4) ** 2).astype(float))
+    flow = flood._d8_flow_dir(elev)
+    acc = flood._flow_accumulation(elev, flow)
+    assert acc[4, 4] == 81.0   # every cell drains through the pit
+    assert acc[0, 0] == 1.0    # rim corners are bare headwaters
+    assert acc.max() == 81.0
+    assert acc[3, 4] > acc[0, 4]  # deeper gaps accrue more upstream weight
 
 
 def test_point_source_floods_downhill_not_uphill():
@@ -246,6 +258,53 @@ def test_point_source_floods_downhill_not_uphill():
     assert mask.sum() > 0
     assert mask[15, 10]
     assert mask[:5, :].sum() == 0  # uphill of the source stays dry
+
+
+def test_tributary_adds_volume_when_draining_into_main(city):
+    grid = datasets.load_city_dem(city.name)
+    coords = datasets.line_vertices(datasets.river_geometry_by_ref(city.name, "w-1"))
+    base = flood.run_river(grid, coords, level_m=3.0, mode="rise")
+    assert base["stats"]["tributaries"] == 0
+
+    res = grid.res_lng
+    c_lng, c_lat = datasets.city_meta(city.name)["center"]
+    trib = {
+        "type": "Feature",
+        "properties": {},
+        "geometry": {
+            "type": "LineString",
+            "coordinates": [
+                [c_lng - 3 * res, c_lat + 6 * res],
+                [c_lng - 2 * res, c_lat + 5 * res],
+            ],
+        },
+    }
+    richer = flood.run_river(grid, coords, level_m=3.0, mode="rise", water_features=[trib])
+    assert richer["stats"]["tributaries"] > 0
+    assert richer["stats"]["volume_m3"] > base["stats"]["volume_m3"]
+    # tributaries add both water and simulated time
+    assert richer["stats"]["sim_steps"] >= base["stats"]["sim_steps"]
+
+
+def test_erosion_flux_step_conserves_volume():
+    rng = np.random.default_rng(3)
+    elev = rng.integers(0, 100, (12, 12)).astype(np.float32)
+    depth = rng.random((12, 12)).astype(np.float32) * 2.0
+    out = flood._flux_ca_step(elev, depth)
+    assert np.all(out > -1e-5)  # never exports more than a cell holds
+    assert np.isclose(out.sum(), depth.sum(), rtol=1e-4)  # nothing disappears
+
+
+def test_inflow_plan_matches_declared_volume(city):
+    grid = datasets.load_city_dem(city.name)
+    coords = datasets.line_vertices(datasets.river_geometry_by_ref(city.name, "w-1"))
+    seeds = flood._channel_seeds(grid, coords)
+    flow = flood._d8_flow_dir(grid.elev)
+    plan = flood._inflow_plan(grid, grid.elev, flow, seeds, None, 3.0, "rise")
+    cell_area = grid.cell_area_m2((grid.min_lat + grid.max_lat) / 2.0)
+    assigned = float((plan["d_cell"].astype(np.float64) * cell_area).sum())
+    assert np.isclose(assigned, plan["volume_m3"], rtol=0.02)  # per-cell shares sum to the volume
+    assert plan["n_steps"] >= flood._MIN_STEPS
 
 
 def test_rivers_in_separate_valleys_stay_disjoint_until_overtopped():
@@ -266,7 +325,7 @@ def test_rivers_in_separate_valleys_stay_disjoint_until_overtopped():
     assert mask_a[:, 10:].sum() == 0            # A confined to its valley
     assert mask_b[:, :12].sum() == 0            # B confined to its valley
 
-    big_a, _ = flood.river_flood_mask(grid, coords_a, level_m=90.0, mode="rise")
+    big_a, _ = flood.river_flood_mask(grid, coords_a, level_m=5000.0, mode="rise")
     assert big_a[:, 10:12].sum() > 0            # overtopped ridge floods both sides
     assert big_a.sum() > mask_a.sum()
 

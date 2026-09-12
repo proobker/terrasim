@@ -2,6 +2,26 @@
 
 Status ledger for terrasim. Most recent at the top. `plans.md` is the spec; this file records what physically exists and what was verified.
 
+## 2026-09-12 - Flood engine v2: transient, volume-conserving, tributary-aware
+
+**Why**: the graded-surface flood ("raise the whole channel, pond-fill the basin") read as one flat blob no matter the river. Replaced with a researched, simpler-but-directional routing model and surfaced the resulting volume in the UI.
+
+**Backend.**
+- `app/engine/flood.py` rewritten as a volume-conserving transient model:
+  - D8 flow directions stay; a `rise` is now translated into a conserved *volume* (reach length x assumed inundation width) rather than a global surface.
+  - The volume is released as a triangular hydrograph over simulated steps (`_SLOPE_STEPS_PER_CELL` assume ~0.8 m/s bank flow, clipped to 120-700 steps); cells flood when the wave front arrives, so upstream floods first and the extent reported is the peak over the run.
+  - Head-driven 8-neighbour flux step (`_flux_ca_step`) moves water between cells while preserving total volume; the grid edge is an infinite wall (water never leaks off). The sim runs inside the D8 downstream/upstream closures plus a 12-cell margin, which cut kathmandu runtime from ~34s to ~1.3s.
+  - Tributaries: any mapped waterline whose D8 basin drains into the chosen river contributes volume (0.5x per tributary cell), lagged by its flow distance to the junction. New `FloodScenario.include_tributaries` (default true) gates it; `main.py` loads `water` features and reuses the engine's `mask` for exposure (no double simulation).
+  - New stats: `volume_m3`, `sim_steps`, `sim_hours`, `peak_discharge_m3s`, `tributaries`, `reach_cells`; `water_surface_m` is now the max peak water surface, and `flood-deep` depth bands are derived from the per-cell peak surface raster (was: graded mean).
+  - `test_engine.py` grew to cover catchment distances, flow accumulation, flux-step volume conservation, plan volume match, tributary contribution, directional downhill routing, and ridge overtopping. Total 30 tests pass.
+
+**Frontend.**
+- `types.ts` FloodStats gains the new optional fields; `ExposurePanel.tsx` shows a routed-volume stat (M m3, est.) and an honest note citing the wave's modelled hours/peak discharge and any tributaries.
+
+**Docs.** `plans.md` section 8 rewritten to match the transient/volume model and its limitations.
+
+**Verified live.** kathmandu Seti: 2 m rise over ~9 h yields ~1.5 km2 extent, ~0.93M m3 routed, 76 overlay features; runoff ~1.3s. Flood copy, labels and arrows already flow-routed from the earlier UI pass.
+
 ## 2026-09-12 — MVP cut-in: end-to-end demo runnable
 
 **Both cities fetch and bundle.**

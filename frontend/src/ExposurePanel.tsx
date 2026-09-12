@@ -65,6 +65,12 @@ export default function ExposurePanel() {
                 <div className="lbl">max modelled depth</div>
               </div>
               <div className="stat-box">
+                <div className="num">
+                  {stats.volume_m3 != null ? (stats.volume_m3 / 1e6).toFixed(1) : "0"}M
+                </div>
+                <div className="lbl">m³ routed (est.)</div>
+              </div>
+              <div className="stat-box">
                 <div className="num">{exposure ? Object.keys(exposure.assets).length : 0}</div>
                 <div className="lbl">asset types modelled</div>
               </div>
@@ -74,8 +80,9 @@ export default function ExposurePanel() {
             )}
             {result.scenario.river_id && (
               <div className="mini-note" style={{ marginTop: 6 }}>
-                Water was routed along the river's downhill flow path; the surface is graded per reach and the value
-                shown is the modelled peak. Scenario-based estimate, not a forecast.
+                Water was routed as a volume-limited wave along the river's downhill flow path
+                {stats.peak_discharge_m3s ? ` over ~${stats.sim_hours ?? 0} h, peaking at ~${stats.peak_discharge_m3s.toFixed(0)} m³/s` : ""}
+                {stats.tributaries ? ", fed by its mapped tributaries" : ""}. Scenario-based estimate, not a forecast.
               </div>
             )}
           </>

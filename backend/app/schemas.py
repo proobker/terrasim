@@ -26,6 +26,7 @@ class FloodScenario(BaseModel):
     river_id: str | None = None
     level_m: float = Field(default=2.0, gt=-20, lt=5000)
     mode: Literal["rise", "absolute"] = "rise"
+    include_tributaries: bool = True
     assets: list[ScenarioAsset] | None = None
 
     @model_validator(mode="after")
