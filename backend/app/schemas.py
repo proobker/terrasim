@@ -24,6 +24,7 @@ class FloodScenario(BaseModel):
     city_id: str
     source: GeoPoint | None = None
     river_id: str | None = None
+    river_path: list[GeoPoint] | None = None
     level_m: float = Field(default=2.0, gt=-20, lt=5000)
     mode: Literal["rise", "absolute"] = "rise"
     include_tributaries: bool = True
@@ -31,8 +32,9 @@ class FloodScenario(BaseModel):
 
     @model_validator(mode="after")
     def exactly_one_origin(self) -> "FloodScenario":
-        if (self.source is None) == (self.river_id is None):
-            raise ValueError("provide exactly one of 'source' or 'river_id'")
+        origins = [self.source is not None, self.river_id is not None, self.river_path is not None]
+        if sum(origins) != 1:
+            raise ValueError("provide exactly one of 'source', 'river_id' or 'river_path'")
         return self
 
 

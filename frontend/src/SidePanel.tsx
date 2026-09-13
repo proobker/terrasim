@@ -200,6 +200,13 @@ function PlaceControls() {
   const pickingOrigin = useStore((s) => s.pickingOrigin);
   const setPickingOrigin = useStore((s) => s.setPickingOrigin);
   const selectedRiverId = useStore((s) => s.selectedRiverId);
+  const pendingAsset = useStore((s) => s.pendingAsset);
+  const stampGrid = useStore((s) => s.stampGrid);
+  const setStampGrid = useStore((s) => s.setStampGrid);
+  const drawnRiver = useStore((s) => s.drawnRiver);
+  const drawingRiver = useStore((s) => s.drawingRiver);
+  const undoDrawPoint = useStore((s) => s.undoDrawPoint);
+  const clearDrawn = useStore((s) => s.clearDrawn);
   const { runHazard, running } = useSimulate();
 
   return (
@@ -212,6 +219,26 @@ function PlaceControls() {
       </div>
       <div className="mini-note">
         Select a tile, then tap the map to drop it. Tap a placed facility to move it.
+      </div>
+
+      <div className="field-row" style={{ margin: 0, alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <span className="pixel-label" style={{ margin: 0 }}>
+          Pocket size
+        </span>
+        {[2, 3, 4, 5].map((n) => (
+          <button
+            key={n}
+            className="pixel-btn tiny"
+            data-active={stampGrid === n}
+            disabled={!pendingAsset}
+            onClick={() => setStampGrid(stampGrid === n ? null : n)}
+          >
+            {n}×{n}
+          </button>
+        ))}
+      </div>
+      <div className="mini-note">
+        Pick a tile and a pocket size, then one tap drops a whole {stampGrid ?? 1}×{stampGrid ?? 1} block of it.
       </div>
 
       {placed.length > 0 && (
@@ -261,7 +288,50 @@ function PlaceControls() {
         </button>
       </div>
 
-      {hazard === "flood" && <FloodOriginPicker />}
+      {hazard === "flood" && (
+        <>
+          <FloodOriginPicker />
+          <div
+            className="field-row"
+            style={{ margin: 0, flexDirection: "column", alignItems: "stretch", gap: 6 }}
+          >
+            <button
+              className="pixel-btn"
+              data-active={drawingRiver}
+              onClick={() => {
+                const st = useStore.getState();
+                if (st.drawingRiver) {
+                  st.setDrawing(false);
+                } else {
+                  st.setPendingAsset(null);
+                  st.setPickingOrigin(false);
+                  st.setSelectedRiverId(null);
+                  st.setDrawing(true);
+                }
+              }}
+              style={drawingRiver ? { background: "var(--gold)" } : undefined}
+            >
+              {drawingRiver ? "✎ Drawing a channel — tap the map" : "✎ Draw a channel along the land"}
+            </button>
+            {drawnRiver && drawnRiver.path.length > 0 && (
+              <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                <span className="mini-note" style={{ margin: 0 }}>
+                  Channel traced ({drawnRiver.path.length} pts)
+                </span>
+                <button className="pixel-btn tiny" onClick={() => undoDrawPoint()}>
+                  ↶ Undo
+                </button>
+                <button className="pixel-btn tiny danger" onClick={() => clearDrawn()}>
+                  × Clear
+                </button>
+              </div>
+            )}
+            <div className="mini-note">
+              Trace a hypothetical channel — the flood rises along it as a scenario, not a forecast.
+            </div>
+          </div>
+        </>
+      )}
 
       <button
         className="pixel-btn"

@@ -1,7 +1,7 @@
 import { api } from "./api";
 import { useStore } from "./store";
 import { useCallback, useRef } from "react";
-import type { PlannedAsset } from "./types";
+import type { PlannedAsset, PointLngLat } from "./types";
 
 function pickHazardSource() {
   const s = useStore.getState();
@@ -29,6 +29,7 @@ export function useSimulate() {
   const quakeDepthKm = useStore((s) => s.quakeDepthKm);
   const placed = useStore((s) => s.placed);
   const selectedRiverId = useStore((s) => s.selectedRiverId);
+  const drawnRiver = useStore((s) => s.drawnRiver);
   const source = useStore((s) => s.source);
   const running = useStore((s) => s.running);
 
@@ -38,9 +39,22 @@ export function useSimulate() {
 
   async function runHazard() {
     if (!city) return;
-    const useRiver = hazard === "flood" && Boolean(selectedRiverId);
-    const origin = useRiver ? null : pickHazardSource();
-    if (!useRiver && !origin) return;
+    const drawnPath: PointLngLat[] | null =
+      hazard === "flood" &&
+      drawnRiver &&
+      drawnRiver.path.length >= 2
+        ? drawnRiver.path
+        : null;
+    let useRiver = false;
+    let origin: PointLngLat | null = null;
+    if (hazard === "flood" && !drawnPath) {
+      useRiver = Boolean(selectedRiverId);
+      origin = useRiver ? null : pickHazardSource();
+      if (!useRiver && !origin) return;
+    } else if (hazard !== "flood") {
+      origin = pickHazardSource();
+      if (!origin) return;
+    }
 
     const assets = mode === "new" && placed.length ? planAssets(placed) : null;
     run(true);
@@ -50,7 +64,11 @@ export function useSimulate() {
         hazard === "flood"
           ? await api.flood({
               city_id: city.id,
-              ...(useRiver ? { river_id: selectedRiverId! } : { source: origin! }),
+              ...(drawnPath
+                ? { river_path: drawnPath }
+                : useRiver
+                  ? { river_id: selectedRiverId! }
+                  : { source: origin! }),
               level_m: floodLevelM,
               mode: "rise",
               assets,
@@ -78,7 +96,11 @@ export function useSimulate() {
     needsAssets: mode === "new" && placed.length === 0,
     hasOrigin:
       hazard === "flood"
-        ? Boolean(selectedRiverId || source)
+        ? Boolean(
+            (drawnRiver && drawnRiver.path.length >= 2) ||
+              selectedRiverId ||
+              source,
+          )
         : Boolean(source),
   };
 }

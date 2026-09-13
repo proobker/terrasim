@@ -12,7 +12,7 @@ import { applyBands, bandsFromResult, buildAssetBlocks, buildBlockFeatures } fro
 import { atlasDefinitions, iconForType } from "./pixelIcons";
 import { useStore } from "./store";
 import type { BlockFeature } from "./buildings3d";
-import type { FeatureCollection, GeoFeature } from "./types";
+import type { FeatureCollection, GeoFeature, PointLngLat } from "./types";
 
 // Layer order, bottom -> top. Re-applied whenever a layer is added/removed.
 const LAYER_ORDER = [
@@ -22,6 +22,7 @@ const LAYER_ORDER = [
   "ts-water",
   "ts-river-sel",
   "ts-river-flow",
+  "ts-drawn-river",
   "ts-overlay",
   "ts-flood-shore",
   "ts-infra-buildings",
@@ -164,6 +165,8 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
   const placed = useStore((s) => s.placed);
   const pendingAsset = useStore((s) => s.pendingAsset);
   const selectedAssetId = useStore((s) => s.selectedAssetId);
+  const drawingRiver = useStore((s) => s.drawingRiver);
+  const drawnRiver = useStore((s) => s.drawnRiver);
   const showRoads = useStore((s) => s.showRoads);
   const showBuildings = useStore((s) => s.showBuildings);
   const showFacilities = useStore((s) => s.showFacilities);
@@ -190,7 +193,13 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
   const moveSelectedPlaced = useStore((s) => s.moveSelectedPlaced);
   const selectAsset = useStore((s) => s.selectAsset);
   const setPendingAsset = useStore((s) => s.setPendingAsset);
+  const setStampGrid = useStore((s) => s.setStampGrid);
+  const appendDrawPoint = useStore((s) => s.appendDrawPoint);
   const setError = useStore((s) => s.setError);
+
+  // Live "rubber-band" preview while drawing a channel; committed points live
+  // in the store so the panel can undo/clear them.
+  const [riverPreview, setRiverPreview] = useState<PointLngLat | null>(null);
 
   // --- create map once -----------------------------------------------------
   useEffect(() => {
@@ -293,6 +302,7 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
         "ts-water",
         "ts-river-sel",
         "ts-river-flow",
+        "ts-drawn-river",
         "ts-overlay",
       ]) {
         map.addSource(id, QUIET_SRC as never);
@@ -364,6 +374,17 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
           "icon-allow-overlap": false,
           visibility: "none",
         },
+      });
+      map.addLayer({
+        id: "ts-drawn-river",
+        type: "line",
+        source: "ts-drawn-river",
+        paint: {
+          "line-color": "#E6C66A",
+          "line-width": 5,
+          "line-opacity": 0.9,
+        },
+        layout: { visibility: "none" },
       });
       map.addLayer({
         id: "ts-overlay",
@@ -562,6 +583,30 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
       const s = useStore.getState();
 
       if (s.mode === "new") {
+        if (s.drawingRiver) {
+          appendDrawPoint({ lng, lat });
+          return;
+        }
+        if (s.stampGrid && s.pendingAsset) {
+          const n = s.stampGrid;
+          const spacingM = 60;
+          const mPerDegLat = 111320;
+          const mPerDegLng = 111320 * Math.cos((lat * Math.PI) / 180);
+          const base = Date.now();
+          const off = (n - 1) / 2;
+          for (let i = 0; i < n; i++) {
+            for (let j = 0; j < n; j++) {
+              addPlaced({
+                id: `plan-${base}-${i}-${j}`,
+                type: s.pendingAsset,
+                lng: lng + ((i - off) * spacingM) / mPerDegLng,
+                lat: lat + ((j - off) * spacingM) / mPerDegLat,
+              });
+            }
+          }
+          setStampGrid(null);
+          return;
+        }
         if (s.pickingOrigin) {
           s.setSource(lng, lat);
           s.setPickingOrigin(false);
@@ -583,6 +628,17 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
       // existing mode: drop flood source / quake epicenter
       setSource(lng, lat);
     });
+
+    // Rubber-band preview of the channel being drawn.
+    map.on("mousemove", (e) => {
+      const s = useStore.getState();
+      if (s.mode === "new" && s.drawingRiver) {
+        setRiverPreview({ lng: e.lngLat.lng, lat: e.lngLat.lat });
+      } else if (s.mode !== "new" || !s.drawingRiver) {
+        setRiverPreview((p) => (p ? null : p));
+      }
+    });
+    map.getCanvas().addEventListener("mouseleave", () => setRiverPreview(null));
 
     map.on("click", "ts-infra-facilities", (e) => {
       const f = e.features?.[0];
@@ -760,6 +816,52 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
     map.setLayoutProperty("ts-river-sel", "visibility", visible);
     map.setLayoutProperty("ts-river-flow", "visibility", visible);
   }, [selectedRiverId, hazard, mapLoaded]);
+
+  // --- drawn river channel (New City hypothetical flood origin) --------------
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapLoaded) return;
+    const src = map.getSource("ts-drawn-river") as
+      | maplibregl.GeoJSONSource
+      | undefined;
+    if (!src) return;
+    const path = drawnRiver?.path ?? [];
+    const features: GeoFeature[] = [];
+    if (path.length >= 2) {
+      features.push({
+        type: "Feature",
+        properties: {},
+        geometry: {
+          type: "LineString",
+          coordinates: path.map((p) => [p.lng, p.lat]),
+        },
+      });
+    }
+    if (mode === "new" && drawingRiver && riverPreview && path.length >= 1) {
+      features.push({
+        type: "Feature",
+        properties: {},
+        geometry: {
+          type: "LineString",
+          coordinates: [
+            [path[path.length - 1].lng, path[path.length - 1].lat],
+            [riverPreview.lng, riverPreview.lat],
+          ],
+        },
+      });
+    }
+    src.setData(fc(features));
+    map.setLayoutProperty(
+      "ts-drawn-river",
+      "visibility",
+      features.length ? "visible" : "none",
+    );
+    try {
+      map.moveLayer("ts-drawn-river");
+    } catch {
+      // layer ordering is best-effort during load
+    }
+  }, [drawnRiver, drawingRiver, riverPreview, mode, mapLoaded]);
 
   // --- infrastructure toggles ------------------------------------------------
   useEffect(() => {
@@ -940,9 +1042,13 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
     if (!map || !mapLoaded) return;
     const annoSource = map.getSource("ts-annos") as
       maplibregl.GeoJSONSource | undefined;
-    // A selected river is drawn as its own highlight; a point marker would
-    // only be a fallback origin in that case.
-    if (!source || !annoSource || (hazard === "flood" && selectedRiverId)) {
+    // A selected river or drawn channel is drawn as its own highlight; a point
+    // marker would only be a fallback origin in that case.
+    if (
+      !source ||
+      !annoSource ||
+      (hazard === "flood" && (selectedRiverId || (drawnRiver && drawnRiver.path.length >= 2)))
+    ) {
       annoSource?.setData(fc([]));
       return;
     }
@@ -954,7 +1060,7 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
       },
     ];
     annoSource.setData(fc(features));
-  }, [source, hazard, selectedRiverId, mode, mapLoaded]);
+  }, [source, hazard, selectedRiverId, drawnRiver, mode, mapLoaded]);
 
   // --- quake epicenter pulse (rAF halo around the epicenter marker) ----------
   useEffect(() => {
@@ -1045,12 +1151,12 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !mapLoaded) return;
-    if (pendingAsset) {
+    if (pendingAsset || drawingRiver) {
       map.getCanvas().style.cursor = "crosshair";
     } else {
       map.getCanvas().style.cursor = "";
     }
-  }, [pendingAsset, mapLoaded]);
+  }, [pendingAsset, drawingRiver, mapLoaded]);
 
   if (!webgl2.current) {
     return (

@@ -197,6 +197,46 @@ def test_river_lookup_by_name_and_rivers_summary(city):
     assert rows[0]["type"] == "waterway"
 
 
+def test_flood_schema_accepts_each_single_origin(city):
+    from app.schemas import FloodScenario
+
+    base = {"city_id": city.name, "level_m": 2.0}
+    FloodScenario(**base, source={"lng": 85.2, "lat": 27.2})
+    FloodScenario(**base, river_id="w-1")
+    FloodScenario(**base, river_path=[{"lng": 85.1, "lat": 27.1}, {"lng": 85.3, "lat": 27.3}])
+    FloodScenario(**base, river_path=[])
+
+
+def test_flood_schema_rejects_zero_or_two_origins(city):
+    from pydantic import ValidationError
+
+    from app.schemas import FloodScenario
+
+    base = {"city_id": city.name, "level_m": 2.0}
+    with pytest.raises(ValidationError):
+        FloodScenario(**base)  # none of source / river_id / river_path
+    with pytest.raises(ValidationError):
+        FloodScenario(**base, source={"lng": 85.2, "lat": 27.2}, river_id="w-1")
+    with pytest.raises(ValidationError):
+        FloodScenario(**base, river_id="w-1", river_path=[{"lng": 85.1, "lat": 27.1}])
+
+
+def test_run_river_accepts_drawn_path(city):
+    """A planner-drawn channel floods like an OSM river, purely from its path."""
+    grid = datasets.load_city_dem(city.name)
+    c_lng, c_lat = datasets.city_meta(city.name)["center"]
+    path = [
+        (c_lng - 0.4, c_lat - 0.4),
+        (c_lng, c_lat),
+        (c_lng + 0.4, c_lat + 0.4),
+    ]
+    result = flood.run_river(grid, path, level_m=6.0, mode="rise")
+    assert not result["dry"]
+    assert result["stats"]["cells_flooded"] > 0
+    centre_r, centre_c = grid.cell(c_lng, c_lat)
+    assert result["mask"][centre_r, centre_c]  # low point collects the rise
+
+
 def test_d8_flow_direction_points_downhill():
     # Plane rising toward the east: each non-edge cell points to a strictly
     # lower (westward) neighbour and never uphill.
