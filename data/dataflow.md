@@ -1,3 +1,6 @@
+# terrasim data flow
+
+```mermaid
 flowchart TD
     subgraph Data["data/bundles/<city>/"]
         CJ["city.json (meta, bounds, valley_cap)"]
@@ -38,9 +41,11 @@ flowchart TD
     Api --> Store
     Store --> Map
     Store --> Exposure
-Summary of the loop:
-- Sources: city bundles (DEM + OSM GeoJSON) are the single truth; the backend never fetches live data.
-- Request: useSimulate POSTs a scenario; in new-city mode the placed assets override real OSM assets (_assets_for).
-- Compute: all physics in backend/app/engine/ (pure, no I/O); overlays return as GeoJSON.
-- Render: setResult → MapView renders bands, ExposurePanel renders verdicts.
-Want me to write this into a file in the repo (e.g. docs/dataflow.md), or adjust the level of detail?
+```
+
+## The loop
+
+- **Sources**: city bundles (DEM + OSM GeoJSON) are the single truth; the backend never fetches live data.
+- **Request**: `useSimulate` POSTs a scenario; in new-city mode the placed assets override real OSM assets (`_assets_for`).
+- **Compute**: all physics in `backend/app/engine/` (pure, no I/O); overlays return as GeoJSON.
+- **Render**: `setResult` → `MapView` renders bands, `ExposurePanel` renders verdicts.
