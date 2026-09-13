@@ -4,7 +4,7 @@
 > "methods" actually do — in plain English. Written for non-engineers who want
 > to understand the machine, and for engineers who want one place to look.
 >
-> Last updated from branch `feat/flow-routed-flood`.
+> Last updated 2026-09-13 — matches the current tree.
 
 ---
 
@@ -32,7 +32,7 @@ terrasim/
 │       ├── datasets.py     loads the offline city data bundles
 │       └── engine/         the actual science lives here
 │           ├── grid.py         1 shared elevation-grid toolbox
-│           ├── flood.py        flow-routed flood engine (new on this branch)
+│           ├── flood.py        flow-routed, volume-conserving flood engine
 │           ├── earthquake.py   simplified quake intensity model
 │           ├── suitability.py  "green/yellow/red" land scoring
 │           ├── exposure.py     does each building get wet / shaken?
@@ -64,7 +64,7 @@ terrasim/
 | **MapLibre GL** | The map engine (WebGL) | Renders the real map, the terrain, the flood/quakes overlays and the 3D blocks in the browser. |
 | **zustand** | Tiny state store | One shared "memory" the whole app reads (`store.ts`) so the map, the panel and the results always agree about the current scenario. |
 | **Canvas + pixel sprites** | Hand-rolled, no image files | `pixelIcons.ts` draws small pixel-art icons (river, fire station, hospital…) into a sprite atlas at load time — Pokemon FireRed-flavoured chrome without shipping a single image asset. |
-| **fill-extrusion layers** | MapLibre 3D building feature | `buildings3d.ts` turns the flat building dots into stylised 3D blocks whose height is *estimated* from OSM tags (`height`, `building:levels`) or a type guess. |
+| **fill-extrusion layers** | MapLibre 3D building feature | `buildings3d.ts` turns each real OSM building **footprint** into a stylised 3D extrusion whose height is *estimated* from OSM tags (`height`, `building:levels`) or a type guess (clamped 3–60 m). Planned (New City) facilities draw as synthetic squares. |
 | **raster-dem + terrain** | 3D ground surface | `MapView.tsx` feeds the DEM to MapLibre's `terrain` mode with **Terrarium** encoding, so the ground itself is bumpy. |
 | **oxlint** | Linter | Nags about code smells and style in the frontend. |
 
@@ -116,7 +116,7 @@ site and returns results; a **GET** returns data.
 ```json
 {
   "city_id": "kathmandu",
-  "river_id": "sr-bishnumati" | "source": {"lng": ..., "lat": ...},
+  "river_id": "sr-bishnumati" | "source": {"lng": ..., "lat": ...} | "river_path": [{"lng": ..., "lat": ...}, ...],
   "level_m": 2.0,
   "mode": "rise",
   "include_tributaries": true,
@@ -125,7 +125,8 @@ site and returns results; a **GET** returns data.
 ```
 
 - `river_id` floods along a river's downhill flow path; `source` floods from a
-  tapped point. Exactly one of the two is required (Pydantic enforces it).
+  tapped point; `river_path` floods along a planner-drawn channel (New City
+  mode). Exactly one of the three is required (Pydantic enforces it).
 - `level_m` is a **hypothetical rise in metres** above the river's channel —
   converted internally into a volume of water, never treated as a "real"
   measured flood depth.
@@ -142,7 +143,7 @@ flag when nothing floods and `overlay` (flood/flood-deep GeoJSON) and
 
 ---
 
-## 6. The star of this branch: the flow-routed flood engine
+## 6. The star of the flood simulation: the flow-routed engine
 
 `backend/app/engine/flood.py` — this is the feature `feat/flow-routed-flood`
 introduces. Understand these terms and you understand the branch:
@@ -228,19 +229,22 @@ server doesn't need Pillow.
 in `data/bundles/<city>/`. It is run once per city (`--city kathmandu` or
 `--all`); the website never downloads anything live.
 
-1. **OpenStreetMap via the Overpass API** — a public query service. It fetches
-   buildings, roads, facilities and waterways for a city box, split into small
-   chunks because big queries make the free mirrors choke. Three mirrors are
-   tried in random order, once each, with quiet backoff ("tolerant pass" — a
-   failed chunk is skipped, never retried hot).
+1. **OpenStreetMap** — buildings for Kathmandu are extracted from a cached
+   **GeoFabrik PBF** extract (`nepal-latest.osm.pbf`, offline, ring-bbox
+   overlap); all other cities query the **Overpass API** for buildings, roads,
+   facilities and waterways for a city box, split into small chunks because big
+   queries make the free mirrors choke. Three mirrors are tried in a fixed
+   healthy-first order (mail.ru → kumi.systems → overpass-api.de), once each,
+   with quiet backoff ("tolerant pass" — a failed chunk is skipped, never
+   retried hot).
 2. **Elevation from the Mapzen "Terrarium" tiles** (Copernicus/SRTM-derived).
    A few PNG tiles covering the city are decoded, stitched, and resampled
    (bilinear) onto a regular lat/lng grid at ~30–33 m per cell.
-3. **Cleaning.** Buildings under a minimum footprint are dropped; the biggest
-   are kept (fetch target up to 4500, the site renders up to 2500). Roads are
+3. **Cleaning.** Buildings under a minimum footprint (40 m²) are dropped; the
+   biggest are kept (fetch target up to 4500 per city). Roads are
    forced to stay lines. Facilities are queried per amenity type so one failure
    can't stall the whole bundle.
-4. **Water normalisation (new on this branch).** OSM rivers come back chopped
+4. **Water normalisation.** OSM rivers come back chopped
    into hundreds of fragments with mismatched spellings ("Seti", "सेती", gaps
    of kilometres). The script merges fragments of the same physical river using
    a bundled **union–find** algorithm on snap-connectivity (fragments whose
@@ -248,7 +252,8 @@ in `data/bundles/<city>/`. It is run once per city (`--city kathmandu` or
    matching (Devanagari-to-Latin transliteration folds like `chh→ch`) and
    family separation (canals never absorb rivers). Output is a handful of
    coherent `MultiLineString` waterways — exactly what makes river-based flood
-   seeding work.
+   seeding work. `--normalize-water` re-runs just this step offline on the
+   committed bundles.
 5. **Valley rim.** When a city defines a `valley_cap_m`, the cells below that
    height form the "valley bowl". Shapely merges them and the outline is
    emitted as `rim.geojson` — *only* when it is a genuine ring. Open basins
@@ -270,9 +275,11 @@ Terrarium tiles.
 
 1. You pick a city → the site fetches its layers (GeoJSON) and shows roads,
    buildings (with `~N m est.` hover height) and facilities.
-2. You pick a hazard and origin (tap the map, or pick a river from a dropdown —
+2. You pick a hazard and origin (tap the map, pick a river from a dropdown —
    the selected river lights up with pixel-art arrows `→` showing the flow
-   direction).
+   direction — or, in New City mode, **draw a channel** across the land
+   yourself). Housing and facilities can be dropped one at a time or stamped
+   as a 2×2…5×5 pocket.
 3. "Run" → `useSimulate.ts` POSTs the scenario → the server returns GeoJSON
    overlays → MapView adds them as live layers:
    - flood = water polygons with a darker **deep core** band;
@@ -284,7 +291,7 @@ Terrarium tiles.
    scenario-based / relative* — never predictive.
 
 Key checkboxes the site carries in `store.ts`: 3D terrain, blocky 3D buildings,
-valley rim, roads, facilities, suitability.
+valley rim, roads, facilities, suitability, drawn river.
 
 ---
 
