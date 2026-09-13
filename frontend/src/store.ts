@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { AssetType, CityInfo, HazardKind, PlannedAsset, RiverSummary, SimResult, SuitabilityResult } from "./types";
+import type { AssetType, CityInfo, DrawnRiver, HazardKind, PlannedAsset, RiverSummary, SimResult, SuitabilityResult } from "./types";
 
 export type BootState = "loading" | "error" | "ready";
 
@@ -26,6 +26,9 @@ interface TerrasimState {
   suitability: SuitabilityResult | null;
   pendingAsset: AssetType | null;
   pickingOrigin: boolean;
+  stampGrid: number | null;
+  drawnRiver: DrawnRiver | null;
+  drawingRiver: boolean;
   placed: PlannedAsset[];
   selectedAssetId: string | null;
 
@@ -55,6 +58,12 @@ interface TerrasimState {
   setError: (e: string | null) => void;
   setSuitability: (s: SuitabilityResult | null) => void;
   setPendingAsset: (t: AssetType | null) => void;
+  setStampGrid: (n: number | null) => void;
+  setDrawnRiver: (r: DrawnRiver | null) => void;
+  appendDrawPoint: (p: { lng: number; lat: number }) => void;
+  undoDrawPoint: () => void;
+  clearDrawn: () => void;
+  setDrawing: (v: boolean) => void;
   addPlaced: (a: PlannedAsset) => void;
   removePlaced: (id: string) => void;
   moveSelectedPlaced: (lng: number, lat: number) => void;
@@ -95,6 +104,9 @@ export const useStore = create<TerrasimState>((set) => ({
   suitability: null,
   pendingAsset: null,
   pickingOrigin: false,
+  stampGrid: null,
+  drawnRiver: null,
+  drawingRiver: false,
   placed: [],
   selectedAssetId: null,
 
@@ -110,7 +122,18 @@ export const useStore = create<TerrasimState>((set) => ({
 
   setCities: (cities) => set({ cities }),
   setBootState: (bootState) => set({ bootState }),
-  selectCity: (city) => set({ city, source: null, rivers: [], selectedRiverId: null, result: null, suitability: null, runCount: 0 }),
+  selectCity: (city) =>
+    set({
+      city,
+      source: null,
+      rivers: [],
+      selectedRiverId: null,
+      drawnRiver: null,
+      drawingRiver: false,
+      result: null,
+      suitability: null,
+      runCount: 0,
+    }),
   setMode: (mode) => set({ mode, result: null }),
   setHazard: (hazard) => set({ hazard, result: null }),
   setFloodLevelM: (floodLevelM) => set({ floodLevelM }),
@@ -118,12 +141,35 @@ export const useStore = create<TerrasimState>((set) => ({
   setQuakeDepthKm: (quakeDepthKm) => set({ quakeDepthKm }),
   setSource: (lng, lat) => set({ source: { lng, lat }, result: null }),
   setRivers: (rivers) => set({ rivers }),
-  setSelectedRiverId: (selectedRiverId) => set({ selectedRiverId, result: null }),
+  setSelectedRiverId: (selectedRiverId) =>
+    set((s) => ({
+      selectedRiverId,
+      drawnRiver: selectedRiverId ? null : s.drawnRiver,
+      result: null,
+    })),
   setResult: (result) => set((s) => ({ result, runCount: s.runCount + 1 })),
   setRunning: (running) => set({ running }),
   setError: (error) => set({ error }),
   setSuitability: (suitability) => set({ suitability }),
   setPendingAsset: (pendingAsset) => set({ pendingAsset }),
+  setStampGrid: (stampGrid) => set({ stampGrid }),
+  setDrawnRiver: (drawnRiver) =>
+    set({ drawnRiver, selectedRiverId: null, source: null, result: null }),
+  appendDrawPoint: (p) =>
+    set((s) => ({
+      drawnRiver: { path: s.drawnRiver ? [...s.drawnRiver.path, p] : [p] },
+      selectedRiverId: null,
+      result: null,
+    })),
+  undoDrawPoint: () =>
+    set((s) => ({
+      drawnRiver:
+        s.drawnRiver && s.drawnRiver.path.length > 1
+          ? { path: s.drawnRiver.path.slice(0, -1) }
+          : null,
+    })),
+  clearDrawn: () => set({ drawnRiver: null }),
+  setDrawing: (drawingRiver) => set({ drawingRiver }),
   addPlaced: (a) => set((s) => ({ placed: [...s.placed, a] })),
   removePlaced: (id) => set((s) => ({ placed: s.placed.filter((a) => a.id !== id) })),
   moveSelectedPlaced: (lng, lat) =>

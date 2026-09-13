@@ -48,6 +48,7 @@ export interface FloodScenario {
   city_id: string;
   source?: PointLngLat | null;
   river_id?: string | null;
+  river_path?: PointLngLat[] | null;
   level_m: number;
   mode: "rise" | "absolute";
   assets?: ScenarioAsset[] | null;
@@ -131,4 +132,8 @@ export interface PlannedAsset {
   type: AssetType;
   lng: number;
   lat: number;
+}
+
+export interface DrawnRiver {
+  path: PointLngLat[];
 }

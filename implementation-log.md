@@ -2,6 +2,23 @@
 
 Status ledger for terrasim. Most recent at the top. `plans.md` is the spec; this file records what physically exists and what was verified.
 
+## 2026-09-13 — New-City: draw-a-channel flood origin + grid-stamp bulk placement
+
+**Why**: the demo needs to *plan a layout fast* and then stress it. Land Planning mode now lets you drop a whole pocket of buildings in one tap, and for flood you can draw a hypothetical channel straight onto the land and run the rise along it — the PLAN → SIMULATE → IMPROVE loop gets a sharper "what if the water ran through here?" move.
+
+**Backend.**
+- `app/schemas.py`: `FloodScenario` gains `river_path: list[GeoPoint] | None`; the origin validator is now *exactly one of* `source` / `river_id` / `river_path`.
+- `app/main.py` `simulate_flood`: new `elif scenario.river_path` branch converts the path to `(lng, lat)` coords and calls `flood.run_river(grid, coords, level_m, mode, None, region=...)` — no OSM tributary inherit for a drawn channel.
+- `tests/test_engine.py`: `test_flood_schema_accepts_each_single_origin`, `test_flood_schema_rejects_zero_or_two_origins`, `test_run_river_accepts_drawn_path`.
+
+**Frontend.**
+- `store.ts`: `drawnRiver: {path} | null`, `drawingRiver`, `stampGrid` (+ `appendDrawPoint`/`undoDrawPoint`/`clearDrawn`/`setDrawing`/`setStampGrid`). Picking an OSM river clears a drawn channel and vice-versa (single-origin invariant). `selectCity` clears both.
+- `MapView.tsx`: new `ts-drawn-river` line layer (gold `#E6C66A`, drawn above the cyan real-river highlight, added to `LAYER_ORDER`); click handler gains a `drawingRiver` branch (append vertex, stay drawing) and a `stampGrid && pendingAsset` branch (drops an n×n grid of the active type at 60 m spacing, unique ids `plan-<ts>-<i>-<j>`, then clears the grid but keeps the asset tool hot). Rubber-band preview segment follows the cursor while drawing. Flood-origin marker is hidden when a channel (drawn or OSM) is the primary origin.
+- `SidePanel.tsx` (Land Planning): "Pocket size" 2×2…5×5 picker under the asset grid; "Draw a channel along the land" toggle + Undo / Clear / point count under the flood origin picker. Copy stays honest: *hypothetical channel*, *"the flood rises along it as a scenario, not a forecast"*.
+- `useSimulate.ts`: flood origin precedence is now **drawn channel → OSM river → point**; `river_path` is sent when a channel exists.
+
+**Verified live.** `uv run pytest` 37 passed. `npx tsc --noEmit -p tsconfig.app.json` and `npm run build` pass. Live smoke: `POST /api/simulate/flood` with `river_path` (3 pts across Kathmandu, level 3 m, rise) → 200, `dry:false`, 6618 cells flooded, response carries the drawn `river_path` back in `scenario`.
+
 ## 2026-09-12 — Fix: flat terrain/3D chunks at the map edges
 
 **Why**: after real footprints shipped, the city view showed flat regions mixed with properly-elevated ones. Two frontend causes, both in `MapView.tsx`:

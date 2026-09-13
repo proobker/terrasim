@@ -146,6 +146,16 @@ def simulate_flood(scenario: FloodScenario) -> dict:
             water_features,
             region=_valley_region(grid, scenario.city_id),
         )
+    elif scenario.river_path is not None:
+        coords = [(p.lng, p.lat) for p in scenario.river_path]
+        result = flood.run_river(
+            grid,
+            coords,
+            scenario.level_m,
+            scenario.mode,
+            None,
+            region=_valley_region(grid, scenario.city_id),
+        )
     else:
         assert scenario.source is not None
         result = flood.run(
