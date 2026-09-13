@@ -17,6 +17,16 @@ It is intended to be given to another AI/model, teammate, designer,
 developer, or judge-preparation assistant so that they understand the
 project without needing the earlier conversation.
 
+**Current status (2026-09-13):** the MVP has shipped. Both modes run on
+committed offline bundles — **Existing City** (kathmandu) simulates flood
+and earthquake scenarios and reports estimated exposure; **New City**
+(pokhara) computes green/yellow/red suitability, accepts proposed
+facilities (including grid-stamped pockets and a drawn flood channel), and
+stress-tests the layout. Sections phrased as "MVP / stretch / future" keep
+that framing intentionally; this document remains a spec plus a forward
+roadmap, and `implementation-log.md` is the record of what physically
+exists.
+
 It consolidates:
 
 -   the original concept
@@ -190,16 +200,25 @@ Show exposed assets
 
 ### Example
 
-User selects Kathmandu or another city.
+User selects Kathmandu.
 
-They select:
+**Earthquake:**
 
--   Earthquake
--   Magnitude 7.2
--   Chosen epicenter
--   Chosen depth
+-   Magnitude (slider 4.5–8.5)
+-   Depth (slider 2–30 km)
+-   Chosen epicenter (tap on the map)
 
-terrasim produces a scenario-based shaking/exposure visualization.
+terrasim produces a scenario-based shaking/exposure visualization with
+four relative intensity bands, clipped to the real valley basin.
+
+**Flood:**
+
+-   A picked river, a point source tapped on the map, or a
+    planner-drawn channel in New City mode
+-   Hypothetical rise (0.5–8 m)
+
+terrasim runs a terrain-based, volume-conserving flood along that flow
+origin and reports the estimated extent, routed volume and exposure.
 
 It then overlays:
 
@@ -274,31 +293,24 @@ These are **relative planning indicators**, not guarantees of safety.
 The proposed workflow is:
 
 ``` text
-Select undeveloped area
+Select undeveloped area (pokhara)
         ↓
-Load terrain/elevation data
+Show green/yellow/red suitability zones
         ↓
-Load hazard/environmental context
+User proposes a city layout
         ↓
-Generate suitability/risk layer
+Place hospital · school · housing · fire station · police · shelter
+        (one tap, or a 2×2…5×5 grid-stamp pocket)
         ↓
-User proposes city layout
+Optionally draw a hypothetical flood channel on the land
         ↓
-Place hospital
-Place school
-Place housing
-Place emergency facilities
-Place roads
+Run disaster simulation (flood or earthquake)
         ↓
-Run disaster simulation
+Identify exposed facilities (per-asset verdicts)
         ↓
-Identify exposed facilities
+Modify layout / re-run / compare verdicts
         ↓
-Modify layout
-        ↓
-Run simulation again
-        ↓
-Compare the plans
+Improve the plan
 ```
 
 The key concept is:
@@ -491,6 +503,25 @@ LOW
 The exact scientific model should be chosen carefully and described
 honestly.
 
+## Implemented model
+
+The shipped engine is a deliberately simple, fully documented attenuation
+proxy:
+
+``` text
+intensity = (magnitude / 6)² × (8 / (8 + D))^1.5
+```
+
+where `D` is the 3D distance to the epicenter (horizontal kilometres
+combined with the stated depth), magnitude is clamped to a user slider
+(4.5–8.5), and intensity is clamped to ≤ 1.0. Cells are painted into four
+**relative** bands at thresholds 0.32 / 0.20 / 0.10 / 0.04 (high /
+medium_high / medium / low). When a city defines a valley basin, the bands
+are clipped to the valley floor so they trace the real bowl instead of
+perfect circles, and buildings report `exposed` per band.
+
+Always described as *estimated relative zones*, never as "will collapse".
+
 ## Infrastructure exposure
 
 The resulting zones can be intersected with:
@@ -531,24 +562,19 @@ Instead:
 
 # 10. Building Data
 
-The preferred initial approach is to use existing geospatial building
-footprints where available.
+Building footprints come from **OpenStreetMap**, fetched in real Polygon
+rings (from a cached GeoFabrik PBF for kathmandu, or chunked Overpass
+`out geom` elsewhere), deduplicated and capped (4500 per city; slivers
+< 40 m² are dropped).
 
-Possible data source:
+The map renders each footprint as a stylised 3D extrusion with an
+**estimated** height, preferring OSM `height`, then `building:levels`,
+then a per-type default (clamped 3–60 m). Sim runs tint exposed blocks in
+band colours; hovering reads "~N m est.".
 
-**OpenStreetMap**
-
-Possible building information:
-
--   building footprint
--   mapped building type where available
--   location
--   surrounding roads
--   nearby facilities
-
-Not every building will have complete attributes.
-
-This is acceptable for an MVP.
+Attributes carried per building: footprint, OSM id, name, mapped type,
+height / building:levels where tagged. Not every building has complete
+attributes — heights remain estimates, never measurements.
 
 ------------------------------------------------------------------------
 
@@ -828,9 +854,11 @@ IMPROVE
 
 # 16. Data Sources
 
-Potential open/free sources discussed for the project include:
+The shipped prototype fetches two sources at build time and serves them
+offline. The other candidates below were considered and are **not**
+integrated. Status is marked per section.
 
-## OpenStreetMap
+## OpenStreetMap  [used]
 
 Use for:
 
@@ -841,33 +869,34 @@ Use for:
 -   points of interest
 -   other mapped infrastructure
 
-OpenStreetMap is open data, subject to its attribution and licensing
-requirements.
+Fetched via the Overpass API (chunked queries) and, for kathmandu, a
+cached GeoFabrik PBF extract (`nepal-latest.osm.pbf`) for building
+footprints. OpenStreetMap is open data, subject to its attribution and
+licensing requirements.
 
 Official source:
 
 https://www.openstreetmap.org/about
 
-------------------------------------------------------------------------
+-----------------------------------------------------------------------
 
-## DEM / Elevation Data
+## DEM / Elevation Data  [used]
 
 Use for:
 
--   terrain
+-   terrain (3D rendering — served as Terrarium-encoded PNG tiles)
 -   flood simulation
 -   slope
 -   elevation context
--   future suitability calculations
+-   suitability calculations
 
-Potential datasets can include open digital elevation models.
+The pipeline downloads Mapzen/Tilezen **Terrarium** tiles (derived from
+Copernicus/SRTM), decoded and resampled in `fetch_data.py` onto the DEM
+grid (~30–33 m per cell at Kathmandu latitude).
 
-The exact dataset should be selected based on geographic coverage and
-resolution.
+-----------------------------------------------------------------------
 
-------------------------------------------------------------------------
-
-## USGS Earthquake Data
+## USGS Earthquake Data  [considered — not integrated]
 
 Use for:
 
@@ -878,15 +907,17 @@ Use for:
 -   historical/real-time context
 
 USGS provides earthquake feeds including GeoJSON formats suitable for
-programmatic applications.
+programmatic applications. The shipped earthquake engine is a parametric
+attenuation proxy driven by user-chosen magnitude/depth/epicenter; USGS
+feeds are not fetched at runtime.
 
 Official feed:
 
 https://earthquake.usgs.gov/earthquakes/feed/
 
-------------------------------------------------------------------------
+-----------------------------------------------------------------------
 
-## Weather / Environmental Data
+## Weather / Environmental Data  [considered — not used]
 
 Potential use:
 
@@ -895,9 +926,8 @@ Potential use:
 -   rainfall context
 -   environmental indicators
 
-A service such as Open-Meteo was considered for weather data.
-
-This is optional for the core MVP.
+A service such as Open-Meteo was considered for weather data; it is
+optional for the core MVP and not integrated.
 
 ------------------------------------------------------------------------
 
@@ -917,32 +947,33 @@ Potential uses:
 Satellite imagery should be an enhancement rather than a dependency for
 the first demo.
 
-------------------------------------------------------------------------
+-----------------------------------------------------------------------
 
-# 17. Proposed Technical Stack
+# 17. Technical Stack (implemented)
 
 ## Frontend
 
-Possible:
+Implemented:
 
--   React
--   Next.js
+-   React 19
+-   Vite (dev server + build)
 -   TypeScript
--   MapLibre GL JS
+-   zustand (shared state)
 
 ## Mapping
 
-**MapLibre GL JS**
+**MapLibre GL JS** (v6)
 
 Use for:
 
 -   interactive maps
 -   vector layers
 -   hazard overlays
--   terrain visualization
--   building/road layers
+-   terrain visualization (raster-dem from Terrarium tiles)
+-   building/road layers (fill-extrusions)
 -   facility markers
--   map interactions
+-   map interactions — including the drawn channel, pocket-stamp and
+    click-to-set hazard origin
 
 MapLibre GL JS is an open-source TypeScript library for interactive web
 maps and supports terrain, 3D buildings, raster/satellite layers,
@@ -952,64 +983,59 @@ Official:
 
 https://maplibre.org/projects/gl-js/
 
-------------------------------------------------------------------------
+-----------------------------------------------------------------------
 
 ## Backend
 
-Possible:
+Implemented:
 
--   Python
--   FastAPI
+-   Python 3.14
+-   FastAPI + uvicorn
+-   Pydantic (request/response schemas)
 
 Responsibilities:
 
 -   simulation requests
 -   geospatial processing
--   data preparation
 -   scenario calculations
--   route calculations
+-   data serving (city metadata, layers, rivers, terrain tiles)
 -   API endpoints
 
-------------------------------------------------------------------------
+-----------------------------------------------------------------------
 
 ## Geospatial Processing
 
-Possible:
+Implemented:
 
 -   NumPy
--   Rasterio
--   GeoPandas
 -   Shapely
 
 Responsibilities:
 
 ### NumPy
 
-Numerical array processing.
-
-### Rasterio
-
-Raster/DEM processing.
-
-### GeoPandas
-
-Vector geospatial processing.
+Array math for the DEM-driven engines (flood routing, quake attenuation,
+suitability, exposure). Pure simulation, no I/O.
 
 ### Shapely
 
-Geometry operations/intersections.
+Vector geometry: flood extent mask→polygon, valley rim extraction, and
+clipping of bands/extents to the valley basin.
 
-------------------------------------------------------------------------
+(Rasterio and GeoPandas were evaluated but are not required — the engine
+stays pure NumPy + Shapely + stdlib. Pillow is a dev-only dependency used
+by `fetch_data.py` to decode elevation tiles. `osmium` backs the PBF
+building extraction for kathmandu.)
+
+-----------------------------------------------------------------------
 
 ## Database
 
-Optional:
+None.
 
--   PostgreSQL
--   PostGIS
-
-For a two-day hackathon, PostGIS may be unnecessary if the dataset is
-small and can be processed in memory or with simpler storage.
+For a two-day hackathon, PostGIS is unnecessary when the dataset is small:
+the demo data is pre-baked into offline bundles in `data/bundles/` and
+loaded in memory at runtime.
 
 ------------------------------------------------------------------------
 
@@ -1051,11 +1077,17 @@ small and can be processed in memory or with simpler storage.
        Buildings       Roads        Facilities
                          |
                          ↓
-                    MAP OUTPUT
-                         |
-                         ↓
+MAP OUTPUT
+                          |
+                          ↓
                  PLAN / MODIFY / RETEST
 ```
+
+The shipped architecture matches this diagram: React + MapLibre frontend →
+FastAPI server → pure NumPy/Shapely simulation + exposure engines → offline
+bundles (OSM layers + DEM + terrain tiles, committed in `data/bundles/`).
+There is no database; terrain is additionally served as cached
+Terrarium-encoded PNG tiles for the 3D map.
 
 ------------------------------------------------------------------------
 
@@ -1064,13 +1096,16 @@ small and can be processed in memory or with simpler storage.
 The MVP should be small enough to finish under severe hackathon time
 constraints.
 
-The known team constraint discussed was:
+The known team constraint was:
 
--   3 coding members
+-   4 coding members
 -   2 days
 
 Therefore the MVP should prioritize a polished vertical slice rather
 than many incomplete features.
+
+Status: **shipped**. Every "Must Have" and both "Strongly recommended"
+items are implemented and runnable (details in `implementation-log.md`).
 
 ## Recommended MVP
 
@@ -1106,7 +1141,9 @@ than two unreliable ones.
 A reliable demo is more important than supporting every possible
 location.
 
-Prepare one known area in advance.
+Prepare one known area in advance. (Both demo areas are prepared and
+committed as offline bundles: kathmandu for Existing City, pokhara for
+New City.)
 
 ## Existing city demo
 
@@ -1145,6 +1182,9 @@ The final moment should communicate:
 ------------------------------------------------------------------------
 
 # 21. Suggested Build Order for 2 Days
+
+Historical build guidance from the spec phase; shipped state is recorded
+in `implementation-log.md`.
 
 ## Day 1
 
@@ -1238,9 +1278,14 @@ If the MVP is working:
 
 Both flood and earthquake.
 
+**Done** — kathmandu ships both hazard engines.
+
 ## Stretch 2
 
 3D terrain.
+
+**Done** — MapLibre raster-dem terrain fed by served Terrarium-encoded
+tiles.
 
 ## Stretch 3
 
@@ -1530,7 +1575,7 @@ The project becomes more credible when its limitations are explicit.
 
 ### Answer
 
-"The map itself isn't our innovation. The workflow is. terrasimsim connects
+"The map itself isn't our innovation. The workflow is. terrasim connects
 disaster simulation with an iterative future-city planning loop: plan,
 simulate, identify weaknesses, change the plan, and simulate again."
 
@@ -1591,7 +1636,7 @@ authoritative datasets, engineering review, and calibration."
 ### Answer
 
 "Our focus is the closed-loop planning workflow. Instead of stopping at
-risk visualization, terrasimsim lets users create a proposed development,
+risk visualization, terrasim lets users create a proposed development,
 stress-test it, identify weaknesses, modify it, and test it again."
 
 ------------------------------------------------------------------------
@@ -1994,7 +2039,7 @@ Illustrated planning workflow.
 
 ### Slide 5
 
-Actual terrasimsim UI / GIS product.
+Actual terrasim UI / GIS product.
 
 ### Slide 6
 
@@ -2123,6 +2168,11 @@ Switch mode.
 
 Show suitability zones.
 
+> "We can draft the whole layout quickly — a pocket of housing at once,
+> and even a hypothetical channel to stress-test the flood."
+
+Stamp a housing pocket; draw a hypothetical channel on the land.
+
 > "Now let's place a hospital, school and residential area."
 
 Run scenario.
@@ -2151,24 +2201,40 @@ If asked:
 
 Answer:
 
-> "The frontend is built around React/Next.js and MapLibre for
-> interactive geospatial visualization. Python/FastAPI handles the
-> backend and simulation logic, with NumPy, Rasterio, GeoPandas and
-> Shapely for geospatial processing. We use OpenStreetMap for
-> infrastructure data and DEM/elevation datasets for terrain-based
-> simulation, with Earth-observation data as an optional layer."
+> "The frontend is React 19 + Vite + TypeScript, with MapLibre GL
+> rendering the map, 3D terrain and the real building footprints as
+> estimated-height 3D blocks. Python + FastAPI serves the simulation API;
+> the engines are pure NumPy + Shapely (flow-routed flood, quake
+> attenuation, suitability). Data is pre-bundled offline: OpenStreetMap
+> layers plus Copernicus/SRTM elevation served as Terrarium tiles. No
+> database — bundles load into memory."
 
 Short version for forms:
 
-> **React/Next.js, TypeScript, MapLibre GL JS, Python, FastAPI, NumPy,
-> GeoPandas, Rasterio, Shapely, OpenStreetMap, DEM/elevation data, and
-> satellite/Earth-observation datasets.**
+> **React 19, TypeScript, Vite, MapLibre GL JS, zustand, Python,
+> FastAPI, Pydantic, NumPy, Shapely, OpenStreetMap,
+> Copernicus/SRTM DEM.**
 
 ------------------------------------------------------------------------
 
 # 46. Deployment Concept
 
-Possible deployment:
+## Current state (2026-09-13)
+
+The prototype runs locally and the demo does not depend on any internet
+service:
+
+``` text
+Frontend   →  Vite dev server (localhost:5173) / built static bundle
+Backend    →  uvicorn FastAPI (localhost:8000)
+Data       →  committed offline bundles in data/bundles/ (no fetch at runtime)
+Database   →  none
+```
+
+API base is configured with `VITE_API_BASE` (default
+http://127.0.0.1:8000).
+
+## Forward path
 
 ``` text
 Frontend
@@ -2181,7 +2247,7 @@ FastAPI server
 
 Data / processing
    ↓
-Preprocessed datasets / object storage
+Preprocessed datasets / static asset hosting
 
 Optional database
    ↓
@@ -2194,7 +2260,7 @@ locations is acceptable.
 A stable demo is more valuable than attempting global real-time
 computation.
 
-------------------------------------------------------------------------
+-----------------------------------------------------------------------
 
 # 47. Reliability Strategy for the Demo
 
@@ -2215,13 +2281,14 @@ Screenshots/video of the working simulation.
 The presenter should never depend on an internet API responding
 perfectly during the pitch.
 
-Prepare:
+Prepare (all committed and offline-ready):
 
--   one known city
--   one known empty/planning area
--   one flood scenario
+-   kathmandu — existing city (flood + earthquake reignite-ready)
+-   pokhara — planning area (suitability + proposed layout)
+-   one flood scenario (river, point source, or drawn channel)
 -   one earthquake scenario
--   preloaded OSM data if possible
+-   offline bundles committed in the repo (no live API dependency at
+    runtime)
 -   cached results if necessary
 
 ------------------------------------------------------------------------
@@ -2340,7 +2407,7 @@ When helping with terrasim:
 
 1.  Preserve the two-mode structure.
 2.  Preserve the Plan → Simulate → Improve loop.
-3.  Do not turn terrasimsim into a generic disaster map.
+3.  Do not turn terrasim into a generic disaster map.
 4.  Do not overclaim prediction accuracy.
 5.  Distinguish MVP features from future features.
 6.  Prefer one reliable simulation over many broken simulations.
@@ -2374,10 +2441,12 @@ earthquakes and visualize estimated exposure of buildings, roads,
 hospitals and schools; and a New City mode that lets users analyze
 undeveloped areas, propose infrastructure placement, simulate disasters
 against the proposed layout, identify weaknesses, and modify the plan.
-Its central workflow is **Plan → Simulate → Improve**. terrasim can combine
-OpenStreetMap infrastructure data, DEM/elevation data, hazard feeds,
-satellite/Earth-observation information, geospatial processing, and
-eventually AI-assisted planning and risk-aware emergency routing. It is
+Its central workflow is **Plan → Simulate → Improve**. The shipped
+prototype runs entirely offline on committed OpenStreetMap and
+Copernicus/SRTM elevation data; hazard parameters are user-chosen so every
+run is an explicit hypothetical. Future iterations may add
+Earth-observation data, AI-assisted planning, and risk-aware emergency
+routing. It is
 deliberately framed as a decision-support prototype rather than a
 disaster predictor or professional engineering system.
 

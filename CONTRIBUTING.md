@@ -1,6 +1,6 @@
 # Contributing to terrasim
 
-> Building Resilient Areas for Climate & Emergencies — hackathon prototype. `plans.md` is the spec; read it (especially the honesty rules §10/§30) before changing UI strings or API fields. `AGENTS.md` has the repo map and the definition of done.
+> Building Resilient Areas for Climate & Emergencies — hackathon prototype. `plans.md` is the spec; read it (especially the honesty rules §30) before changing UI strings or API fields. `AGENTS.md` has the repo map and the definition of done.
 
 ## Setup
 
@@ -17,7 +17,7 @@ Follow **README.md** (backend `uv sync` + uvicorn; frontend `npm install` + `npm
 ## Tests
 
 ```bash
-cd backend && uv run pytest        # 13 tests: engine (fast, no network) + API (bundle-backed)
+cd backend && uv run pytest        # 37 tests: engine (fast, no network) + API (bundle-backed)
 cd frontend && npx tsc --noEmit -p tsconfig.app.json
 cd frontend && npm run build
 ```

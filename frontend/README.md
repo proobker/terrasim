@@ -1,32 +1,52 @@
-# React + TypeScript + Vite
+# terrasim frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+Vite + React 19 + TypeScript dev client for the [terrasim](../README.md) demo.
+Renders the map, 3D terrain and real OSM building footprints as estimated-height
+3D blocks over a Pokemon FireRed-flavoured pixel-art UI — not a stock dashboard.
 
-Currently, two official plugins are available:
+## Stack
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+- React 19 + TypeScript + Vite
+- MapLibre GL JS (WebGL2 map engine)
+- zustand (shared state)
+- oxlint (linting)
 
-## React Compiler
+## Run
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the Oxlint configuration
-
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
-
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+```bash
+npm install
+npm run dev
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+Open `http://localhost:5173`. The backend must be running on
+`http://127.0.0.1:8000` (override with `VITE_API_BASE`).
+
+## Quality gates
+
+```bash
+npx tsc --noEmit -p tsconfig.app.json     # typecheck
+npm run build                             # typecheck + production build
+```
+
+## Layout
+
+```
+src/
+  App.tsx           mode switch, boot screen, toasts, facility chips
+  MapView.tsx       MapLibre map + hazard/terrain layers; click-to-set source/epicenter; place/move/stamp assets; draw a flood channel
+  SidePanel.tsx     Scenario Lab (existing) / Land Planning (new) controls
+  ExposurePanel.tsx result stats + per-asset verdicts (flood → `affected`, quake → `exposed`)
+  store.ts          zustand store (city/mode/hazard/params/source/result/placedAssets/drawn river/...)
+  useSimulate.ts    runHazard / planAssets / useSuitability API hooks
+  api.ts            endpoint list for the backend
+  buildings3d.ts    real OSM footprints → 3D extrusions (estimated heights, band tinting)
+  pixelIcons.ts     canvas-generated pixel sprites (atlasDefinitions + previewCanvas)
+  index.css         full pixel/FireRed design system (palette in plans.md §39)
+```
+
+## Conventions
+
+- Every measurement label reads "~N m est." — heights are estimates, never
+  measurements.
+- Band colours mark *scenario exposure*, never damage.
+- FireRed chrome is a requirement, not a garnish.

@@ -4,7 +4,7 @@ Agent-facing map for **terrasim** — Building Resilient Areas for Climate & Eme
 
 ## Where the context lives
 
-- `plans.md` — the master spec. Read it up front; re-read visual identity (§38–41), scientific-honesty rules (§30), judge objections (§31), terminology-to-avoid (§10), and the demo script (§44–47) before UI/claims work.
+- `plans.md` — the master spec. Read it up front; re-read visual identity (§38–41), scientific-honesty rules and the terminology to avoid (§30), judge objections (§31), and the demo script (§44–47) before UI/claims work.
 - `CLAUDE.md` — working notes and aesthetic rules (polished handcrafted pixel-art RPG over a real map, not a generic dashboard).
 - `README.md` — user-facing setup, API table, attribution. Do not duplicate it here.
 
@@ -43,13 +43,14 @@ data/bundles/<city>/ city.json geometry (+ hazard_bounds/valley_cap_m), dem.meta
 - Frontend typecheck: `cd frontend && npx tsc --noEmit -p tsconfig.app.json`
 - Frontend prod build: `cd frontend && npm run build` (runs tsc -b + vite build)
 - Run servers: backend `cd backend && uv run uvicorn app.main:app --port 8000`; frontend `cd frontend && npm run dev` (localhost:5173). API base env `VITE_API_BASE`, default `127.0.0.1:8000`.
-- Rebuild a data bundle: `cd backend && uv run --group dev python ../scripts/fetch_data.py --city <id>` (`--all` for every city). Pillow lives in the `dev` dependency group.
+- Rebuild a data bundle: `cd backend && uv run --group dev python ../scripts/fetch_data.py --city <id>` (`--all` for every city). Pillow lives in the `dev` dependency group. `--pbf-buildings` and `--normalize-water` re-run single steps offline (see gotchas).
 
 ## Data-pipeline gotchas (unwritten in README)
 
 - Overpass bbox order is **lat_min, lng_min, lat_max, lng_max** (S,W,N,E) — reversed boxes silently return nothing.
-- Mirrors throttle bursts; `overpass-api.de` is unreachable from this machine. Fetch strategy is a **single tolerant pass**: mirrors tried once (shuffled), 1.5s backoff, `OVERPASS_TIMEOUT=40`; a chunk that fails is skipped by its caller rather than retried hot. Keep it tolerant or builds hang for minutes.
-- Buildings are fetched with `out geom` on an independent 3×3 chunk grid (tiny chunks → full rings, not the degenerate 2-point ways large `out geom` extracts produce) and run through `filter_buildings()` (drops slivers <40 m² and any LineString leftovers) before the 4500 largest-first cap — `buildings.geojson` holds real **Polygon** footprints.
+- Mirrors throttle bursts; `overpass-api.de` is unreachable from this machine. Fetch strategy is a **single tolerant pass**: mirrors tried once in a fixed healthy-first order (mail.ru → kumi.systems → overpass-api.de), 1.5s backoff, `OVERPASS_TIMEOUT=40`; a chunk that fails is skipped by its caller rather than retried hot. Keep it tolerant or builds hang for minutes. Do not re-shuffle into a "random" order — the fixed order is deliberate.
+- Buildings: **kathmandu is extracted from a cached GeoFabrik PBF** (`nepal-latest.osm.pbf`) in `scripts/fetch_data.py` via osmium (`buildings_from_pbf`, ring-bbox overlap, min area 40 m²); it is the fast, reliable path and can be rebuilt offline with `--pbf-buildings`. Any other city falls back to chunked Overpass `out geom 3000` on a 6×6 grid (`BUILDING_SPLITS=6`; tiny whole chunks → full rings, not the degenerate 2-point ways large `out geom` extracts produce). Both paths run `filter_buildings()` (drops slivers <40 m² and any LineString leftovers) before the 4500 largest-first cap — `buildings.geojson` holds real **Polygon** footprints.
+- Water: OSM waterways arrive chopped into hundreds of fragments; `normalize_water()` merges them (union–find on snap-connectivity, same-stem gaps ≤20 km, Devanagari→Latin fuzzy names) into a handful of coherent rivers. `--normalize-water` re-runs just this step offline on the committed bundles (kathmandu = 114 features, pokhara = 210 after merge).
 - Roads use `to_features(..., keep_lines=True)`: always LineString, never closed as Polygon. Polygons are wrapped `[ring]` per GeoJSON. 3-point extras are dropped as ambiguous. Non-Zero passes finalize.
 - Building footprints in `buildings.geojson` are Polygon rings carrying OSM `id` (+ `height`, `building:levels` when tagged) so the frontend extrusions are real footprints with estimated heights and can be tinted per exposed asset.
 - `rim.geojson` is written only when the lowland below `valley_cap_m` forms a genuine ring. Open basins (the DEM box connecting to an adjacent plain, e.g. Kathmandu's NW edge) are rejected by the edge-hugging guard — no file, and the frontend hides the "Valley rim" toggle rather than dream up a fake line.
@@ -57,7 +58,7 @@ data/bundles/<city>/ city.json geometry (+ hazard_bounds/valley_cap_m), dem.meta
 
 ## Conventions (load-bearing)
 
-- **Honesty framing**: every UI string and API field says *estimated / hypothetical / scenario-based / relative / candidate / exposure* — never *predicts / guaranteed / will collapse*. Flood on dry ground reports `dry: true` and the UI says nothing floods. This is not decoration; plans.md §30 and §10.
+- **Honesty framing**: every UI string and API field says *estimated / hypothetical / scenario-based / relative / candidate / exposure* — never *predicts / guaranteed / will collapse*. Flood on dry ground reports `dry: true` and the UI says nothing floods. This is not decoration; plans.md §30.
 - **Illustration, not survey**: 3D building *footprints* come from real OSM ways, but *heights* are stylised estimates (OSM tags when present, type defaults otherwise); hover clearly reads "~N m est.". Band colours on blocks mark *scenario exposure*, never damage.
 - **Fallbacks feel wrong**: precommitted demo data means the demo works offline-ish; a failed sim or empty overlay is a bug, not an acceptable output.
 - **Vibe-check before done**: open the running app and scrutinize as a player. Stock map look, default dev styling, or inconsistent spacing fails the bar. FireRed chrome is a requirement, not a garnish.

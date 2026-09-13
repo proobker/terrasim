@@ -17,10 +17,11 @@ The core loop is **PLAN → SIMULATE → IMPROVE**.
 
 ## Stack
 
-- **Frontend**: Vite + React + TypeScript + MapLibre GL, styled with a pixel-art RPG UI (Pokemon FireRed-inspired chrome).
-- **Backend**: Python + FastAPI (hosted locally, `http://127.0.0.1:8000`).
-- **Simulation**: DEM-based flood fill, earthquake attenuation model, suitability/risk zones (NumPy + Shapely).
-- **Data**: OpenStreetMap (buildings, roads, facilities, rivers) + Copernicus/SRTM elevation, preloaded offline in `data/bundles/`.
+- **Frontend**: Vite + React 19 + TypeScript + MapLibre GL, styled with a pixel-art RPG UI (Pokemon FireRed-inspired chrome).
+- **Backend**: Python 3.14 + FastAPI (hosted locally, `http://127.0.0.1:8000`).
+- **Simulation**: flow-routed volume-conserving flood, earthquake attenuation, suitability/risk zones (NumPy + Shapely).
+- **Data**: OpenStreetMap (real building footprints, roads, facilities, rivers) + Copernicus/SRTM elevation, preloaded offline in `data/bundles/`.
+- **Map**: real OSM building footprints as 3D extrusions with estimated heights; 3D terrain from Terrarium-encoded DEM tiles; no database.
 
 ```
 terrasim/
@@ -59,32 +60,48 @@ Open `http://localhost:5173`.
 Bundled demo data ships in the repo (`data/bundles/`). To regenerate it from upstream sources:
 
 ```bash
-python scripts/fetch_data.py --all
+cd backend
+uv run --group dev python ../scripts/fetch_data.py --all
 ```
+
+(`--pbf-buildings` rebuilds only the offline PBF building layer for cities
+that use one; `--normalize-water` re-runs water snapping offline.)
 
 ---
 
 ## API overview
 
-| Method | Endpoint                          | Purpose                                   |
-| ------ | --------------------------------- | ----------------------------------------- |
-| GET    | `/api/health`                     | Health check                              |
-| GET    | `/api/cities`                     | List available demo areas                 |
-| GET    | `/api/cities/{id}/layers/{kind}`  | Buildings / roads / facilities / water / rim GeoJSON |
-| GET    | `/api/cities/{id}/rivers`         | River summaries for flood hypothesis selection |
-| GET    | `/api/cities/{id}/dem`            | Elevation raster metadata + tiles         |
-| POST   | `/api/simulate/flood`             | Flood scenario → extent + exposure        |
-| POST   | `/api/simulate/earthquake`        | Earthquake scenario → zones + exposure    |
-| POST   | `/api/suitability`                | New-City suitability (green/yellow/red)   |
+| Method | Endpoint                               | Purpose                                   |
+| ------ | -------------------------------------- | ----------------------------------------- |
+| GET    | `/api/health`                          | Health check                              |
+| GET    | `/api/cities`                          | List available demo areas                 |
+| GET    | `/api/cities/{id}`                     | City metadata (bounds, hazard_bounds, valley_cap_m, DEM grid, attribution) |
+| GET    | `/api/cities/{id}/layers/{kind}`       | Buildings / roads / facilities / water / rim GeoJSON |
+| GET    | `/api/cities/{id}/rivers`              | River summaries for flood hypothesis selection |
+| GET    | `/api/cities/{id}/terrain/{z}/{x}/{y}.png` | Terrarium elevation tiles (3D terrain) |
+| POST   | `/api/simulate/flood`                  | Flood scenario → extent + exposure        |
+| POST   | `/api/simulate/earthquake`             | Earthquake scenario → zones + exposure    |
+| POST   | `/api/cities/{id}/suitability`         | New-City suitability (green/yellow/red)   |
 
-A flood scenario floods either from a clicked source point (`source: {lng, lat}`) or
-from a selected river (`river_id`, from `/api/cities/{id}/rivers`), with
-`level_m` as the hypothesized rise in meters above the river's channel level.
+A flood scenario accepts exactly one origin per request: a point source
+(`source: {lng, lat}`), a selected river (`river_id`, from
+`/api/cities/{id}/rivers`), or a planner-drawn channel (`river_path`, from
+New City mode). `level_m` is the hypothesized rise in metres above the
+river's channel level; `mode` is `rise` (default) or `absolute`;
+`include_tributaries` (default true) lets mapped rivers drain into the
+chosen one. Optional `assets` replace real OSM assets with a planner's
+proposed layout.
 
 Run the test suite:
 
 ```bash
 cd backend && uv run pytest
+```
+
+Frontend typecheck:
+
+```bash
+cd frontend && npx tsc --noEmit -p tsconfig.app.json
 ```
 
 ---
