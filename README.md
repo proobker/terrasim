@@ -35,6 +35,16 @@ terrasim/
 
 ## Local setup
 
+### Fast path: run everything with one command
+
+From the repo root (first run also installs backend + frontend deps):
+
+```cmd
+run-dev.cmd
+```
+
+Opens two labeled windows — backend on `http://127.0.0.1:8000`, frontend on `http://localhost:5173`. Close them to stop.
+
 ### 1. Backend (FastAPI on localhost:8000)
 
 ```bash

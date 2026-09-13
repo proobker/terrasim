@@ -42,7 +42,7 @@ data/bundles/<city>/ city.json geometry (+ hazard_bounds/valley_cap_m), dem.meta
 - Backend tests: `cd backend && uv run pytest` — must pass before shipping.
 - Frontend typecheck: `cd frontend && npx tsc --noEmit -p tsconfig.app.json`
 - Frontend prod build: `cd frontend && npm run build` (runs tsc -b + vite build)
-- Run servers: backend `cd backend && uv run uvicorn app.main:app --port 8000`; frontend `cd frontend && npm run dev` (localhost:5173). API base env `VITE_API_BASE`, default `127.0.0.1:8000`.
+- Run servers: `run-dev.cmd` from the repo root starts both (backend `cd backend && uv run uvicorn app.main:app --port 8000`; frontend `cd frontend && npm run dev`, localhost:5173). API base env `VITE_API_BASE`, default `127.0.0.1:8000`. For manual runs, the backend/frontend commands above work individually.
 - Rebuild a data bundle: `cd backend && uv run --group dev python ../scripts/fetch_data.py --city <id>` (`--all` for every city). Pillow lives in the `dev` dependency group. `--pbf-buildings` and `--normalize-water` re-run single steps offline (see gotchas).
 
 ## Data-pipeline gotchas (unwritten in README)
