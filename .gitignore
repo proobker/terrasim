@@ -11,6 +11,7 @@ __pycache__/
 .pytest_cache/
 .coverage
 .uv/
+*.egg-info/
 
 # OS / editor
 .DS_Store
