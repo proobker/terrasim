@@ -90,14 +90,14 @@ API as a Docker web service and the frontend as a static site.
    and confirm `render.yaml`. Render provisions:
    - `terrasim-api` — FastAPI + uvicorn (Docker, Python 3.14), health check at `/api/health`.
    - `terrasim` — builds `frontend/` with `npm run build` and serves `dist/`.
-2. **Custom domains** (Settings → Custom Domains on each service):
-   - Frontend: point `terrasim.rabidahal.com.np` (CNAME) at the static-site target Render shows
+2. **Custom domain** (Settings → Custom Domains on the frontend service):
+   - Point `terrasim.rabidahal.com.np` (CNAME) at the static-site target Render shows
      (e.g. `terrasim.onrender.com`). Add it as a custom domain.
-   - API: point `api.terrasim.rabidahal.com.np` (CNAME) at the API service target
-     (e.g. `terrasim-api.onrender.com`). Add it as a custom domain.
-   - The blueprint already sets `VITE_API_BASE=https://api.terrasim.rabidahal.com.np`
-     and `CORS_ORIGINS=https://terrasim.rabidahal.com.np`, so no further env editing.
-3. HTTPS is automatic on both domains.
+   - The API stays on its Render URL (`terrasim-api.onrender.com`); no extra domain needed.
+   - The blueprint already sets `VITE_API_BASE=https://terrasim-api.onrender.com`
+     and `CORS_ORIGINS=https://terrasim.rabidahal.com.np,https://terrasim.onrender.com`,
+     so no further env editing.
+3. HTTPS is automatic on the custom domain and both `.onrender.com` URLs.
 
 ### Env variables (already set in the blueprint)
 

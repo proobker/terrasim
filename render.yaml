@@ -7,7 +7,7 @@ services:
     healthCheckPath: /api/health
     envVars:
       - key: CORS_ORIGINS
-        value: https://terrasim.rabidahal.com.np
+        value: https://terrasim.rabidahal.com.np,https://terrasim.onrender.com
 
   - type: web
     name: terrasim
@@ -18,4 +18,4 @@ services:
       - key: NODE_VERSION
         value: "22"
       - key: VITE_API_BASE
-        value: https://api.terrasim.rabidahal.com.np
+        value: https://terrasim-api.onrender.com
