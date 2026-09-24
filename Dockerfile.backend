@@ -1,0 +1,11 @@
+FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim
+
+WORKDIR /app
+
+COPY . .
+
+RUN cd backend && uv sync --frozen --no-dev
+
+EXPOSE 8000
+
+CMD ["sh", "-c", "cd backend && uv run uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]

@@ -7,12 +7,22 @@ FastAPI server hosting the simulation + data layer. Run locally:
 
 from __future__ import annotations
 
+import os
+
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from app import __version__, datasets
 from app.engine import earthquake, exposure, flood, suitability, terrain_tiles
 from app.schemas import EarthquakeScenario, FloodScenario, SuitabilityRequest
+
+
+def _cors_origins() -> list[str]:
+    """Local dev origins, plus any deployments supplied via CORS_ORIGINS."""
+    origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
+    extra = os.environ.get("CORS_ORIGINS", "")
+    origins.extend(o.strip() for o in extra.split(",") if o.strip())
+    return origins
 
 
 def _assets_for(scenario: FloodScenario | EarthquakeScenario) -> dict[str, list[dict]]:
@@ -52,10 +62,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ],
+    allow_origins=_cors_origins(),
     allow_methods=["*"],
     allow_headers=["*"],
 )

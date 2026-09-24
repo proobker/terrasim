@@ -2,6 +2,28 @@
 
 Status ledger for terrasim. Most recent at the top. `plans.md` is the spec; this file records what physically exists and what was verified. Entries follow the development-log template (Goal / What we did / Problem / Solution / Result / Evidence) and only record what actually happened.
 
+## 2026-09-24 — Deploy: Render blueprint + GitHub hardening
+
+### Goal
+Host the demo publicly (free tier) and make the GitHub repo contributor-ready: a reproducible backend image, a static frontend build wired to a live API base, CORS that accepts a custom domain, CI that gates PRs, and a real issue/feature backlog.
+
+### What we did
+- **Backend.** `app/main.py`: CORS origins now come from a `CORS_ORIGINS` env var (comma-separated, appended to the localhost defaults); no origin lost when deployed.
+- **Deploy.** `Dockerfile.backend`: `ghcr.io/astral-sh/uv:python3.14-bookworm-slim`, `uv sync --frozen --no-dev`, uvicorn on `0.0.0.0:${PORT:-8000}`; `DATA_ROOT` resolves to the committed `data/bundles/` absolute path, so no env needed in the container. `.dockerignore` skips `.git`, `frontend/node_modules`, `frontend/dist`, `data/fetch`, `*.egg-info`. `render.yaml` blueprint: `terrasim-api` (docker web, health check `/api/health`, `CORS_ORIGINS=https://terrasim.rabidahal.com.np`) + `terrasim` (static, `cd frontend && npm ci && npm run build`, publish `./frontend/dist`, `NODE_VERSION=22` for Vite 8, `VITE_API_BASE=https://api.terrasim.rabidahal.com.np`). README gains a "Deploy on Render" section (blueprint flow, custom-domain CNAMEs, free-tier cold-start note).
+- **GitHub.** `.github/workflows/ci.yml`: backend job (setup-uv py3.14 → `uv sync --frozen` → `uv run pytest`) + frontend job (Node 22 → `npm ci` → `oxlint` → `tsc --noEmit` → `npm run build`) on push/PR. Issue templates (bug + feature) and a PR template mirror the AGENTS.md definition of done and honesty framing. Removed the accidentally committed `backend/terrasim_backend.egg-info/` from git and ignored `*.egg-info/`.
+
+### Problem
+The app only ran locally: CORS hardcoded to localhost, no container/blueprint, Vite 8 would fail on Render's default Node, committed `egg-info` polluted the tree, and the repo had no CI or issue scaffolding.
+
+### Solution
+A Render blueprint with a uv-based Docker backend and a static frontend whose build-time `VITE_API_BASE` points at the API service under the custom domain, plus CI and issue/PR templates.
+
+### Result
+`uv run pytest` 37 passed. `npm run lint`, `npx tsc --noEmit -p tsconfig.app.json`, `npm run build` pass. Native boot check of the container command: `/api/health` → `{"status":"ok","version":"0.1.0","cities":2}`; CORS preflight + GET with `Origin: https://terrasim.rabidahal.com.np` both return `Access-Control-Allow-Origin: https://terrasim.rabidahal.com.np`. Docker image build not run locally (no Docker daemon on this machine) — Render performs it on deploy.
+
+### Evidence
+implementation-log entry (this one); commit + push + created GitHub issues following.
+
 ## 2026-09-13 — New-City: draw-a-channel flood origin + grid-stamp bulk placement
 
 ### Goal

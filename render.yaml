@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: terrasim-api
+    runtime: docker
+    dockerfilePath: Dockerfile.backend
+    plan: free
+    healthCheckPath: /api/health
+    envVars:
+      - key: CORS_ORIGINS
+        value: https://terrasim.rabidahal.com.np
+
+  - type: web
+    name: terrasim
+    runtime: static
+    plan: free
+    buildCommand: cd frontend && npm ci && npm run build
+    staticPublishPath: ./frontend/dist
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: VITE_API_BASE
+        value: https://api.terrasim.rabidahal.com.np

@@ -79,6 +79,46 @@ that use one; `--normalize-water` re-runs water snapping offline.)
 
 ---
 
+## Deploy on Render
+
+The repo ships a `render.yaml` blueprint (free tier, two services): the backend
+API as a Docker web service and the frontend as a static site.
+
+### Via the dashboard (recommended)
+
+1. Push the repo to GitHub; in Render select **New → Blueprint**, connect the repo,
+   and confirm `render.yaml`. Render provisions:
+   - `terrasim-api` — FastAPI + uvicorn (Docker, Python 3.14), health check at `/api/health`.
+   - `terrasim` — builds `frontend/` with `npm run build` and serves `dist/`.
+2. **Custom domains** (Settings → Custom Domains on each service):
+   - Frontend: point `terrasim.rabidahal.com.np` (CNAME) at the static-site target Render shows
+     (e.g. `terrasim.onrender.com`). Add it as a custom domain.
+   - API: point `api.terrasim.rabidahal.com.np` (CNAME) at the API service target
+     (e.g. `terrasim-api.onrender.com`). Add it as a custom domain.
+   - The blueprint already sets `VITE_API_BASE=https://api.terrasim.rabidahal.com.np`
+     and `CORS_ORIGINS=https://terrasim.rabidahal.com.np`, so no further env editing.
+3. HTTPS is automatic on both domains.
+
+### Env variables (already set in the blueprint)
+
+| Variable       | Service        | Purpose                                              |
+| -------------- | -------------- | ---------------------------------------------------- |
+| `VITE_API_BASE`| `terrasim`     | API base baked into the static build (set at build)  |
+| `NODE_VERSION` | `terrasim`     | Node 22 (Vite 8 requirement)                         |
+| `CORS_ORIGINS` | `terrasim-api` | Extra browser origins the API allows, comma-separated|
+
+`TERRASIM_DATA` is left unset: the API loads bundles from the committed
+`data/bundles/` in the repo image.
+
+### Notes
+
+- The free tier spins down after ~15 min idle; the first request after a pause
+  is slow while the API wakes. A scheduled keep-alive ping (e.g. a free cron
+  job hitting `/api/health`) removes the worst of it.
+- Data bundles are committed, so the deployed app works with no external data fetches.
+
+---
+
 ## API overview
 
 | Method | Endpoint                               | Purpose                                   |
