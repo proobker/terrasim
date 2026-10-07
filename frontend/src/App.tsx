@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import MapView from "./MapView";
 import SidePanel from "./SidePanel";
 import Topbar from "./Topbar";
@@ -62,9 +62,29 @@ function MapHint() {
   return <div className="map-hint">{text}</div>;
 }
 
+// A deployed API on a free host sleeps when idle and takes up to a minute to
+// wake; every retry fails fast meanwhile. Say so instead of flashing the
+// local-dev "start the server" hint at visitors.
+const REMOTE_API = !/^https?:\/\/(localhost|127\.0\.0\.1)(:|\/|$)/.test(api.base);
+
+function useSecondsSince(since: number | null): number {
+  const [seconds, setSeconds] = useState(0);
+  useEffect(() => {
+    if (since === null) return;
+    const id = setInterval(() => setSeconds(Math.floor((Date.now() - since) / 1000)), 1000);
+    return () => clearInterval(id);
+  }, [since]);
+  return since === null ? 0 : seconds;
+}
+
 function BootScreen({ loadProgress }: { loadProgress: { fraction: number; stage: string } }) {
   const bootState = useStore((s) => s.bootState);
   const cities = useStore((s) => s.cities);
+  // Retries flip bootState back to "loading" every 2.5 s; keying off the
+  // first failure keeps the message steady instead of flickering.
+  const failedAt = useStore((s) => s.bootFailedAt);
+  const waking = REMOTE_API && failedAt !== null && cities.length === 0 && bootState !== "ready";
+  const wakeSeconds = useSecondsSince(waking ? failedAt : null);
 
   return (
     <div className="boot-screen">
@@ -84,6 +104,18 @@ function BootScreen({ loadProgress }: { loadProgress: { fraction: number; stage:
               <button className="pixel-btn primary" style={{ marginTop: 14 }} onClick={() => void bootstrapCities()}>
                 Retry
               </button>
+            </>
+          ) : waking ? (
+            <>
+              <div className="tagline" style={{ marginTop: 10 }}>
+                waking up the sim engine… {wakeSeconds}s
+              </div>
+              <div className="mini-note">
+                The free server naps when nobody is using it. It is usually back in under a minute.
+              </div>
+              <div className="pixel-bar">
+                <div style={{ width: `${Math.min(90, 15 + wakeSeconds * 1.25)}%` }} />
+              </div>
             </>
           ) : bootState === "error" ? (
             <>

@@ -634,3 +634,48 @@ def test_point_assets_exposure_matches_per_feature_path(city_id):
     mask[: grid.nrows // 2] = True
     got = exposure.evaluate_flood_exposure(grid, {"buildings": head}, mask)
     assert got == exposure.evaluate_flood_exposure(grid, as_dicts, mask)
+
+
+@pytest.mark.parametrize("city_id", ["kathmandu", "pokhara"])
+def test_road_assets_exposure_matches_per_feature_path(city_id):
+    """Roads are densified into a multi-point PointAssets; exposure must equal
+    the per-feature path (any point flooded / worst band), counts and ids."""
+    grid = datasets.load_city_dem(city_id)
+    step = min(grid.res_lng, grid.res_lat) * 2
+    fc = datasets.load_layer(city_id, "roads")["features"][:3000]
+    as_dicts = {
+        "roads": [
+            {
+                "id": (f.get("properties") or {}).get("id") or f"roads:{i}",
+                "name": (f.get("properties") or {}).get("name"),
+                "geometry": f.get("geometry"),
+            }
+            for i, f in enumerate(fc)
+        ]
+    }
+    arrays = {"roads": exposure.line_assets("roads", fc, step)}
+    lng, lat = float(np.mean(arrays["roads"].lng)), float(np.mean(arrays["roads"].lat))
+    quake = (lng, lat, 6.5, 10.0)
+    assert exposure.evaluate_quake_exposure(grid, arrays, *quake) == (
+        exposure.evaluate_quake_exposure(grid, as_dicts, *quake)
+    )
+    mask = np.zeros(grid.elev.shape, dtype=bool)
+    mask[: grid.nrows // 2] = True
+    assert exposure.evaluate_flood_exposure(grid, arrays, mask) == (
+        exposure.evaluate_flood_exposure(grid, as_dicts, mask)
+    )
+
+
+def test_quake_exposure_takes_most_severe_band_along_a_road():
+    """A road running from the epicentre outwards is in the high band."""
+    grid = datasets.load_city_dem("kathmandu")
+    lng, lat = 85.33, 27.70
+    road = {
+        "type": "Feature",
+        "properties": {"id": 1},
+        "geometry": {"type": "LineString", "coordinates": [[lng, lat], [lng + 0.3, lat]]},
+    }
+    step = min(grid.res_lng, grid.res_lat) * 2
+    for assets in ({"roads": [dict(road, id=1)]}, {"roads": exposure.line_assets("roads", [road], step)}):
+        got = exposure.evaluate_quake_exposure(grid, assets, lng, lat, 7.0, 10.0)
+        assert got["exposed"][0]["band"] == "high"

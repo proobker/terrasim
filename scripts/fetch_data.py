@@ -455,6 +455,155 @@ def buildings_from_pbf(
     return handler.out
 
 
+ROAD_CLASSES = frozenset({
+    "motorway", "trunk", "primary", "secondary", "tertiary",
+    "residential", "unclassified", "living_street",
+})
+# Douglas-Peucker tolerance for road lines (~2 m): drops collinear OSM
+# vertices without visibly bending a street. Coordinates keep 5 decimals
+# (~1 m): finer than the map draws or the ~30 m exposure grid samples, and
+# ~15% smaller gzipped than 6.
+ROAD_SIMPLIFY_DEG = 2.0 / 111_320.0
+
+
+def roads_from_pbf(pbf_path: Path, bounds: list[float]) -> list[dict]:
+    """Return road LineStrings (``ROAD_CLASSES``) overlapping ``bounds``.
+
+    Same deterministic PBF path as the buildings: the Overpass road pass is
+    capped per chunk (``out geom 3000``) and by ``ROAD_MAX``, which left the
+    northern half of the Kathmandu valley with no roads at all.
+    """
+    import osmium  # type: ignore[import-not-found]
+    from shapely.geometry import LineString
+
+    w0, s0, e0, n0 = bounds
+
+    class _Handler(osmium.SimpleHandler):
+        def __init__(self) -> None:
+            super().__init__()
+            self.out: list[dict] = []
+
+        def way(self, way: osmium.osm.Way) -> None:
+            highway = way.tags.get("highway")
+            if highway not in ROAD_CLASSES:
+                return
+            pts: list[tuple[float, float]] = []
+            for ref in way.nodes:
+                if not ref.location.valid():
+                    return
+                pts.append((ref.location.lon, ref.location.lat))
+            if len(pts) < 2:
+                return
+            lons = [p[0] for p in pts]
+            lats = [p[1] for p in pts]
+            if max(lons) < w0 or min(lons) > e0 or max(lats) < s0 or min(lats) > n0:
+                return
+            line = LineString(pts).simplify(ROAD_SIMPLIFY_DEG, preserve_topology=False)
+            coords = [[round(x, 5), round(y, 5)] for x, y in line.coords]
+            if len(coords) < 2:
+                return
+            props: dict = {"id": way.id, "type": highway}
+            if name := way.tags.get("name:en") or way.tags.get("name"):
+                props["name"] = name
+            self.out.append(
+                {
+                    "type": "Feature",
+                    "properties": props,
+                    "geometry": {"type": "LineString", "coordinates": coords},
+                }
+            )
+
+    handler = _Handler()
+    handler.apply_file(str(pbf_path), locations=True, idx="sparse_file_array")
+    return handler.out
+
+
+def facilities_from_pbf(pbf_path: Path, bounds: list[float]) -> list[dict]:
+    """Return ``FACILITY_TYPES`` amenities (nodes, and ways as their bbox
+    centre) inside ``bounds`` as Points.
+
+    The Overpass path capped the whole set at ``FACILITY_MAX``: Kathmandu's
+    500 slots filled with hospitals and clinics alone, so schools, fire and
+    police stations and shelters never made it into the bundle.
+    """
+    import osmium  # type: ignore[import-not-found]
+
+    w0, s0, e0, n0 = bounds
+    amenity_rx = re.compile("^(" + "|".join(FACILITY_TYPES.values()) + ")$")
+
+    class _Handler(osmium.SimpleHandler):
+        def __init__(self) -> None:
+            super().__init__()
+            self.out: list[dict] = []
+
+        def _emit(self, osm_id: str, tags, lng: float, lat: float) -> None:
+            if not (w0 <= lng <= e0 and s0 <= lat <= n0):
+                return
+            props: dict = {"id": osm_id, "type": tags.get("amenity")}
+            if name := tags.get("name:en") or tags.get("name"):
+                props["name"] = name
+            self.out.append(
+                {
+                    "type": "Feature",
+                    "properties": props,
+                    "geometry": {"type": "Point", "coordinates": [round(lng, 6), round(lat, 6)]},
+                }
+            )
+
+        def node(self, node: osmium.osm.Node) -> None:
+            if amenity_rx.match(node.tags.get("amenity", "")) and node.location.valid():
+                self._emit(f"n{node.id}", node.tags, node.location.lon, node.location.lat)
+
+        def way(self, way: osmium.osm.Way) -> None:
+            if not amenity_rx.match(way.tags.get("amenity", "")):
+                return
+            locs = [n.location for n in way.nodes if n.location.valid()]
+            if not locs:
+                return
+            lons = [p.lon for p in locs]
+            lats = [p.lat for p in locs]
+            self._emit(
+                f"w{way.id}", way.tags, (min(lons) + max(lons)) / 2, (min(lats) + max(lats)) / 2
+            )
+
+    handler = _Handler()
+    handler.apply_file(str(pbf_path), locations=True, idx="sparse_file_array")
+    return handler.out
+
+
+def city_feature_bounds(cfg: dict) -> list[float]:
+    """Union of the core ``bounds`` and the valley theatre: every box the map
+    frames, so infra layers never stop short of the view."""
+    boxes = [cfg["bounds"]] + [cfg[k] for k in ("building_bounds", "hazard_bounds") if cfg.get(k)]
+    return [
+        min(b[0] for b in boxes),
+        min(b[1] for b in boxes),
+        max(b[2] for b in boxes),
+        max(b[3] for b in boxes),
+    ]
+
+
+def write_infra_from_pbf(city_id: str) -> None:
+    """Regenerate only ``roads.geojson`` + ``facilities.geojson`` from the PBF
+    (no Overpass, no DEM re-fetch)."""
+    cfg = CITIES[city_id]
+    bounds = city_feature_bounds(cfg)
+    download_file(GEOFABRIK_NEPAL, PBF_CACHE)
+    for kind, extract in (("roads", roads_from_pbf), ("facilities", facilities_from_pbf)):
+        print(f"[{city_id}] reading {kind} from PBF over {bounds}...", flush=True)
+        features = extract(PBF_CACHE, bounds)
+        dest = BUNDLES / city_id / f"{kind}.geojson"
+        dest.write_text(
+            json.dumps(
+                {"type": "FeatureCollection", "features": features},
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        print(f"[{city_id}] {kind}: {len(features)} ({dest.stat().st_size / 1e6:.1f} MB)")
+
+
 def pbf_buildings(bounds: list[float]) -> list[dict]:
     """Cached-PBF building features (bbox + sliver filtered in-line)."""
     download_file(GEOFABRIK_NEPAL, PBF_CACHE)
@@ -1087,7 +1236,11 @@ def build_city(city_id: str, force: bool = False) -> None:
         if cfg.get("building_max", BUILDING_MAX) is not None:
             buildings = buildings[: cfg["building_max"]]
 
-    roads = to_features(osm["roads"].get("elements", []), "geometry", False, keep_lines=True)
+    if cfg.get("buildings_source") == "pbf":
+        roads = roads_from_pbf(PBF_CACHE, city_feature_bounds(cfg))
+        facilities = facilities_from_pbf(PBF_CACHE, city_feature_bounds(cfg))
+    else:
+        roads = to_features(osm["roads"].get("elements", []), "geometry", False, keep_lines=True)
     water = to_features(
         osm["water"].get("elements", []),
         "geometry",
@@ -1098,8 +1251,9 @@ def build_city(city_id: str, force: bool = False) -> None:
     )
     water = normalize_water(water)
     water = water[:WATER_MAX]
-    facilities = to_features(osm["facilities_result"], None, True)
-    facilities = facilities[:FACILITY_MAX]
+    if cfg.get("buildings_source") != "pbf":
+        facilities = to_features(osm["facilities_result"], None, True)
+        facilities = facilities[:FACILITY_MAX]
 
     for name, fc in (
         ("buildings", buildings),
@@ -1173,10 +1327,24 @@ def main() -> None:
         help="regenerate only buildings.geojson for the target city/ies from the "
         "cached GeoFabrik PBF (no Overpass, no DEM re-fetch)",
     )
+    parser.add_argument(
+        "--pbf-infra",
+        action="store_true",
+        help="regenerate only roads.geojson + facilities.geojson for the target "
+        "city/ies from the cached GeoFabrik PBF (no Overpass, no DEM re-fetch)",
+    )
     args = parser.parse_args()
 
     BUNDLES.mkdir(parents=True, exist_ok=True)
     targets = list(CITIES) if args.all else ([args.city] if args.city else [])
+    if args.pbf_infra:
+        if not targets:
+            parser.error("pass --pbf-infra with --city <id> or --all")
+        for city_id in targets:
+            if city_id not in CITIES:
+                parser.error(f"unknown city: {city_id}")
+            write_infra_from_pbf(city_id)
+        return
     if args.pbf_buildings:
         if not targets:
             parser.error("pass --pbf-buildings with --city <id> or --all")

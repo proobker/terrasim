@@ -13,6 +13,7 @@ import threading
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 
 from app import __version__, datasets
 from app.engine import building_tiles, earthquake, exposure, flood, suitability, terrain_tiles
@@ -68,6 +69,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# Scenario results are big JSON (a Kathmandu quake lists every exposed
+# building: ~16 MB raw, a fraction of that gzipped). Responses that already
+# carry Content-Encoding (layers, building tiles) pass through untouched.
+app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
 
 
 def _warm_caches() -> None:
@@ -75,7 +80,8 @@ def _warm_caches() -> None:
 
     The small layers are gzipped; buildings ship as vector tiles instead (the
     full 100 MB layer stays reachable but is no longer warmed), so the block
-    index is loaded and the opening-view tiles are encoded up front.
+    index is loaded and the opening-view tiles are encoded up front. Exposure
+    assets are built too, so the first scenario run is as fast as the rest.
     """
     for meta in datasets.list_cities():
         city_id = meta["id"]
@@ -88,6 +94,9 @@ def _warm_caches() -> None:
                 continue
         try:
             building_tiles.city(city_id)
+            # Building points + densified roads: the first scenario run
+            # otherwise pays ~5 s building them.
+            datasets.load_assets(city_id)
         except FileNotFoundError:
             continue
         wide = meta.get("hazard_bounds") or meta.get("bounds")

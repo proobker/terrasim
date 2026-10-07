@@ -17,7 +17,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from app.engine import building_tiles
-from app.engine.exposure import PointAssets
+from app.engine.exposure import PointAssets, line_assets
 from app.engine.grid import DemGrid, load_dem
 
 DATA_ROOT = Path(
@@ -95,6 +95,21 @@ def layer_gzip(city_id: str, kind: str) -> tuple[bytes, str]:
     return _gzipped(path, stat.st_mtime_ns), f'"{stat.st_mtime_ns:x}-{stat.st_size:x}"'
 
 
+@lru_cache(maxsize=4)
+def _road_assets_cached(path: Path, mtime_ns: int, step_deg: float) -> PointAssets:
+    with path.open("r", encoding="utf-8") as fh:
+        features = json.load(fh).get("features", [])
+    return line_assets("roads", features, step_deg)
+
+
+def _road_assets(city_id: str) -> PointAssets:
+    grid = load_city_dem(city_id)
+    # Same sampling step the per-feature exposure path uses for lines.
+    step_deg = min(grid.res_lng, grid.res_lat) * 2
+    path = _layer_path(city_id, "roads")
+    return _road_assets_cached(path, path.stat().st_mtime_ns, step_deg)
+
+
 def load_assets(city_id: str) -> dict[str, list[dict] | PointAssets]:
     """Load buildings/roads/facilities for exposure.
 
@@ -102,14 +117,17 @@ def load_assets(city_id: str) -> dict[str, list[dict] | PointAssets]:
     ``name``, ``kind`` and ``type`` (the mapped OSM ''highway'' / amenity tag).
     Buildings are a :class:`PointAssets` read from ``buildings.blocks.npz``:
     parsing the 100 MB Kathmandu GeoJSON per run peaked at ~900 MB, more than
-    the 512 MB host has.
+    the 512 MB host has. Roads are a multi-point :class:`PointAssets` too
+    (27k whole-valley roads made the per-feature loop the slowest part of a
+    quake run), built once per bundle.
     """
     _layer_path(city_id, "buildings")  # FileNotFoundError for an unknown city
     pts = building_tiles.points(city_id)
     assets: dict[str, list[dict] | PointAssets] = {
         "buildings": PointAssets("buildings", pts.lng, pts.lat, pts.ids, pts.name_table, pts.name_idx)
     }
-    for kind in ("roads", "facilities"):
+    assets["roads"] = _road_assets(city_id)
+    for kind in ("facilities",):
         fc = load_layer(city_id, kind)
         items = []
         for idx, feature in enumerate(fc.get("features", [])):

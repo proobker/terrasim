@@ -75,7 +75,8 @@ uv run --group dev python ../scripts/fetch_data.py --all
 ```
 
 (`--pbf-buildings` rebuilds only the offline PBF building layer for cities
-that use one; `--normalize-water` re-runs water snapping offline.)
+that use one; `--pbf-infra` rebuilds only roads + facilities from the same PBF
+over the whole valley; `--normalize-water` re-runs water snapping offline.)
 
 ---
 
@@ -106,6 +107,12 @@ API as a Docker web service and the frontend as a static site.
      and `CORS_ORIGINS=https://terrasim.rabidahal.com.np,https://terrasim.onrender.com`,
      so no further env editing.
 3. HTTPS is automatic on the custom domain and both `.onrender.com` URLs.
+4. **Cold starts.** A free Render web service sleeps after 15 min idle, and the
+   wake takes 30–60 s (the boot screen says so). `.github/workflows/keep-warm.yml`
+   pings `/api/health` every 10 min to keep `terrasim-api` awake. GitHub may delay
+   scheduled runs, so for a stricter guarantee point an uptime monitor at the same
+   URL. Disable the workflow if other free services share the Render workspace:
+   one always-on service uses ~730 of its 750 free instance-hours a month.
 
 ### Env variables (already set in the blueprint)
 

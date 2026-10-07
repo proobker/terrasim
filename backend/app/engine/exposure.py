@@ -21,10 +21,14 @@ _BAND_LABELS = {"high": "high", "medium_high": "medium_high", "medium": "medium"
 
 @dataclass(frozen=True)
 class PointAssets:
-    """Many single-point assets held as arrays (a city's buildings).
+    """Many assets held as arrays (a city's buildings, or its roads).
 
     Exposure classifies them in one numpy pass instead of one dict per asset
     — results match the per-feature path exactly, in the same order.
+
+    By default each asset is one point. With ``starts`` (CSR offsets, length
+    n_assets + 1, no empty segment) asset ``i`` owns the sample points
+    ``starts[i]:starts[i+1]`` — a road densified along its length.
     """
 
     kind: str
@@ -33,9 +37,16 @@ class PointAssets:
     ids: np.ndarray  # int; negative means "positional": f"{kind}:{index}"
     name_table: np.ndarray
     name_idx: np.ndarray
+    starts: np.ndarray | None = None
 
     def __len__(self) -> int:
-        return int(self.lng.size)
+        return int(self.ids.size)
+
+    def per_asset(self, values: np.ndarray, ufunc: np.ufunc) -> np.ndarray:
+        """Reduce per-point ``values`` to one value per asset with ``ufunc``."""
+        if self.starts is None:
+            return values
+        return ufunc.reduceat(values, self.starts[:-1])
 
     def id_at(self, i: int) -> Any:
         fid = int(self.ids[i])
@@ -68,6 +79,38 @@ def _quake_band_index(
     for i in reversed(range(len(earthquake.BANDS))):
         band[index >= earthquake.BAND_THRESHOLDS[i]] = i
     return band
+
+
+def line_assets(kind: str, features: list[dict], step_deg: float) -> PointAssets:
+    """Line features (roads) as a multi-point :class:`PointAssets`, sampled
+    exactly like the per-feature path (``_asset_points``)."""
+    lng: list[float] = []
+    lat: list[float] = []
+    starts = [0]
+    ids: list[int] = []
+    names: list[str] = []
+    for feature in features:
+        pts = _asset_points(feature, step_deg) if feature.get("geometry") else []
+        if not pts:
+            continue
+        for x, y in pts:
+            lng.append(x)
+            lat.append(y)
+        starts.append(len(lng))
+        props = feature.get("properties") or {}
+        fid = props.get("id")
+        ids.append(fid if isinstance(fid, int) and fid >= 0 else -1)
+        names.append(str(props.get("name") or ""))
+    name_table, name_idx = np.unique(np.asarray(names, dtype=str), return_inverse=True)
+    return PointAssets(
+        kind,
+        np.asarray(lng, dtype=np.float64),
+        np.asarray(lat, dtype=np.float64),
+        np.asarray(ids, dtype=np.int64),
+        name_table,
+        name_idx.astype(np.int32),
+        np.asarray(starts, dtype=np.int64),
+    )
 
 
 def _densify(points, step_deg: float):
@@ -124,7 +167,9 @@ def evaluate_flood_exposure(
 
     for kind, features in assets.items():
         if isinstance(features, PointAssets):
-            hit = flooded_mask[_cells(grid, features.lng, features.lat)]
+            hit = features.per_asset(
+                flooded_mask[_cells(grid, features.lng, features.lat)], np.logical_or
+            )
             results[kind] = {"flooded": int(hit.sum()), "total": len(features)}
             affected_ids.extend(
                 {"kind": kind, "name": features.name_at(i), "id": features.id_at(i)}
@@ -171,7 +216,11 @@ def evaluate_quake_exposure(
             counts[band] = 0
         counts["none"] = 0
         if isinstance(features, PointAssets):
-            band_i = _quake_band_index(grid, features, epicenter_lng, epicenter_lat, magnitude, depth_km)
+            # A lower BANDS index is more severe: a road takes its worst point.
+            band_i = features.per_asset(
+                _quake_band_index(grid, features, epicenter_lng, epicenter_lat, magnitude, depth_km),
+                np.minimum,
+            )
             tally = np.bincount(band_i, minlength=len(earthquake.BANDS) + 1)
             counts["total"] = len(features)
             for i, band in enumerate(earthquake.BANDS):
@@ -190,14 +239,15 @@ def evaluate_quake_exposure(
         for feature in features:
             counts["total"] += 1
             points = _asset_points(feature, step_deg)
-            worst: tuple[int, str | None] = (0, None)
+            # Most severe band across the asset's points (BANDS is ordered
+            # high -> low, so the smallest index wins).
+            worst: int | None = None
             for lng, lat in points:
-                band = None
                 b, _ = quake_zones_at(lng, lat, grid, epicenter_lng, epicenter_lat, magnitude, depth_km)
-                rank = earthquake.BANDS.index(b) + 1 if b else 0
-                if rank > worst[0]:
-                    worst = (rank, b)
-            band = worst[1] or "none"
+                if b is not None:
+                    i = earthquake.BANDS.index(b)
+                    worst = i if worst is None else min(worst, i)
+            band = earthquake.BANDS[worst] if worst is not None else "none"
             counts[band] += 1
             if band in earthquake.BANDS:
                 if kind == "buildings":

@@ -22,6 +22,9 @@ const BUILDINGS_SOURCE_LAYER = "buildings";
 const buildingTilesUrl = (cityId: string) =>
   `${api.base}/api/cities/${cityId}/tiles/buildings/{z}/{x}/{y}.pbf`;
 
+// OSM highway classes drawn bold at every zoom (see the ts-infra-roads layer).
+const MAJOR_ROADS = ["motorway", "trunk", "primary", "secondary"];
+
 // Layer order, bottom -> top. Re-applied whenever a layer is added/removed.
 const LAYER_ORDER = [
   "ts-sus-red",
@@ -582,20 +585,57 @@ export default function MapView({
         id: "ts-infra-roads",
         type: "line",
         source: "ts-infra-roads",
+        // ~27k whole-valley roads: arterials carry the valley view, the
+        // residential mesh fades in as the camera closes on a neighbourhood.
         paint: {
           "line-color": "#d9b957",
-          "line-width": 1.3,
-          "line-opacity": 0.85,
+          "line-width": [
+            "interpolate",
+            ["linear"],
+            ["zoom"],
+            11,
+            ["match", ["get", "type"], MAJOR_ROADS, 1.4, "tertiary", 0.9, 0.35],
+            15,
+            ["match", ["get", "type"], MAJOR_ROADS, 3, "tertiary", 2.2, 1.4],
+          ],
+          "line-opacity": [
+            "interpolate",
+            ["linear"],
+            ["zoom"],
+            11,
+            ["match", ["get", "type"], MAJOR_ROADS, 0.9, "tertiary", 0.7, 0.4],
+            14,
+            0.85,
+          ],
         },
       });
       map.addLayer({
         id: "ts-infra-facilities",
         type: "symbol",
         source: "ts-infra-facilities",
+        // ~4k facilities: icons collide instead of stacking, emergency
+        // services winning the slot, so the valley view stays legible and
+        // zooming in reveals every school and shelter.
         layout: {
           "icon-image": ["get", "icon"],
-          "icon-size": 0.55,
-          "icon-allow-overlap": true,
+          "icon-size": ["interpolate", ["linear"], ["zoom"], 11, 0.45, 15, 0.6],
+          "icon-allow-overlap": false,
+          "icon-padding": 1,
+          "symbol-sort-key": [
+            "match",
+            ["get", "icon"],
+            "ts-hospital",
+            0,
+            "ts-fire",
+            1,
+            "ts-police",
+            2,
+            "ts-clinic",
+            3,
+            "ts-shelter",
+            4,
+            5,
+          ],
         },
       });
       map.addLayer({

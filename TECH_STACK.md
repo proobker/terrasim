@@ -236,9 +236,9 @@ server doesn't need Pillow.
 in `data/bundles/<city>/`. It is run once per city (`--city kathmandu` or
 `--all`); the website never downloads anything live.
 
-1. **OpenStreetMap** — buildings for Kathmandu are extracted from a cached
-   **GeoFabrik PBF** extract (`nepal-latest.osm.pbf`, offline, ring-bbox
-   overlap); all other cities query the **Overpass API** for buildings, roads,
+1. **OpenStreetMap** — buildings, roads and facilities for Kathmandu are
+   extracted from a cached **GeoFabrik PBF** extract (`nepal-latest.osm.pbf`,
+   offline, whole valley); all other cities query the **Overpass API** for buildings, roads,
    facilities and waterways for a city box, split into small chunks because big
    queries make the free mirrors choke. Three mirrors are tried in a fixed
    healthy-first order (mail.ru → kumi.systems → overpass-api.de), once each,

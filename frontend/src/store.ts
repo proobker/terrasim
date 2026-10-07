@@ -9,6 +9,8 @@ interface TerrasimState {
   mode: "existing" | "new";
   cityLoaded: boolean;
   bootState: BootState;
+  /** When the first city fetch failed (ms epoch); null until then. */
+  bootFailedAt: number | null;
 
   hazard: HazardKind;
   floodLevelM: number;
@@ -87,6 +89,7 @@ export const useStore = create<TerrasimState>((set) => ({
   mode: "existing",
   cityLoaded: false,
   bootState: "loading",
+  bootFailedAt: null,
 
   hazard: "earthquake",
   floodLevelM: 2,
@@ -121,7 +124,11 @@ export const useStore = create<TerrasimState>((set) => ({
   facilityDetail: null,
 
   setCities: (cities) => set({ cities }),
-  setBootState: (bootState) => set({ bootState }),
+  setBootState: (bootState) =>
+    set((s) => ({
+      bootState,
+      bootFailedAt: bootState === "error" ? (s.bootFailedAt ?? Date.now()) : s.bootFailedAt,
+    })),
   selectCity: (city) =>
     set({
       city,

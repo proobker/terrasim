@@ -2,6 +2,73 @@
 
 Status ledger for terrasim. Most recent at the top. `plans.md` is the spec; this file records what physically exists and what was verified. Entries follow the development-log template (Goal / What we did / Problem / Solution / Result / Evidence) and only record what actually happened.
 
+## 2026-10-07 — Whole-valley roads + facilities, and faster loads
+
+### Goal
+1. Roads stopped about halfway up the Kathmandu valley. Cover the whole valley.
+2. Make the live site load faster.
+
+### What we did
+- **Data (`scripts/fetch_data.py`).**
+  - New `roads_from_pbf` and `facilities_from_pbf` read the cached GeoFabrik PBF over `city_feature_bounds`: the union of `bounds`, `building_bounds` and `hazard_bounds`, i.e. `[85.15, 27.54, 85.47, 27.78]` for Kathmandu.
+  - New `--pbf-infra` flag, and `build_city` uses these extractors for PBF cities.
+  - Roads are simplified with Douglas-Peucker (~2 m) and stored at 5 decimals.
+  - Kathmandu roads: 5,538 → **27,342** (6.6 MB raw, 1.26 MB gzipped).
+  - Kathmandu facilities: 500 → **4,045**: 2,275 schools, 489 colleges, 427 clinics, 266 hospitals, 215 community centres, 201 shelters, 152 police, 16 universities, 4 fire stations.
+- **Backend: exposure (`exposure.py`, `datasets.py`).**
+  - `PointAssets` takes an optional `starts` (CSR offsets), so one asset can own many sample points. `line_assets` densifies roads with the same sampling as the per-feature path.
+  - Flood uses `np.logical_or.reduceat` across a road's points and quake uses `np.minimum.reduceat` (most severe band).
+  - Road arrays are cached per bundle (`datasets._road_assets`), and `_warm_caches` builds them at startup.
+- **Backend: bug fix.** The per-feature quake path reported a multi-point asset's *least* severe band: it took the max of `BANDS.index + 1`, and BANDS runs high → low. It now takes the most severe band.
+- **Backend: API.** Added `GZipMiddleware` (≥1 KB, level 5). Responses that already carry `Content-Encoding` (layers, building tiles) pass through untouched.
+- **Frontend: map styling (`MapView.tsx`).**
+  - Road width and opacity now depend on OSM class and zoom: motorway/trunk/primary/secondary stay bold, residential lanes fade in.
+  - Facility icons collide instead of stacking (`icon-allow-overlap: false`). `symbol-sort-key` puts hospital, then fire, then police, then clinic, then shelter, then school.
+- **Frontend: boot screen (`App.tsx`, `store.ts`).** Against a non-local API, the first failed city fetch switches the boot screen to a steady "waking up the sim engine… Ns" message with a progress bar. Before, it flickered every 2.5 s between "connecting" and the dev-only `uv run uvicorn` hint. The first failure time is stored as `bootFailedAt` in the store.
+- **Infra.**
+  - New `.github/workflows/keep-warm.yml` pings `/api/health` every 10 min.
+  - `render.yaml` serves `/assets/*` (content-hashed) with `Cache-Control: public, max-age=31536000, immutable`.
+- **Tests.**
+  - `test_road_assets_exposure_matches_per_feature_path[kathmandu|pokhara]`
+  - `test_quake_exposure_takes_most_severe_band_along_a_road`
+- **Docs.** README (deploy cold starts, `--pbf-infra`), AGENTS.md (PBF infra gotcha) and TECH_STACK.md.
+
+### Problem
+- **Roads.** The Overpass pass split `bounds` into 2×2 chunks, capped each at `out geom 3000`, and stopped once `ROAD_MAX=4500` was reached. That happened after the two southern chunks, so the north was never queried. It also only covered the core box, not the valley.
+- **Facilities.** The whole set was capped at `FACILITY_MAX=500`, and hospitals and clinics alone used all 500 slots.
+- **Load time.** A live profile from a fresh browser:
+  - `/api/cities` failed for **~46 s** while the sleeping free-tier API woke (`x-render-routing: hibernate-wake-error` / `no-deploy`, 502/503). The page revealed at 63 s.
+  - With the API up, the rest of boot took **~2.5 s**. The frontend was never the bottleneck.
+- **Quake runs.** A Kathmandu quake response was 16 MB of uncompressed JSON. With 5× the roads, the per-feature road loop pushed a quake run from 4.8 s to 8.3 s.
+
+### Solution
+- Extract roads and facilities from the PBF the buildings already come from.
+- Vectorise road exposure the same way buildings were.
+- Gzip API responses.
+- Keep the API awake and say so honestly while it wakes.
+- Cache the hashed assets forever.
+
+### Result
+Measured locally:
+
+| | before | after |
+|---|---|---|
+| Kathmandu quake M7.0, warm | 4.8 s (half the roads) | **0.8 s** (all roads) |
+| quake response on the wire | 16.0 MB | **1.34 MB** gzipped |
+| server memory after a quake | peak 311 MB | peak 284 MB |
+| local boot to reveal | — | 3.3 s |
+
+The roads layer download grows from 0.62 MB to 1.26 MB gzipped for 5× the roads.
+
+### Evidence
+Verified live:
+- Live profile via Chrome DevTools against `terrasim.rabidahal.com.np` before the change: reveal at 62.9 s, with `/api/cities` failing until 46.6 s. A second load failed for 33 s, then revealed 2.5 s after the API answered.
+- Checks on the new code and data:
+  - `uv run pytest`: 58 passed.
+  - `npx tsc -b` and `npm run lint` are clean (the one ExposurePanel warning was already there).
+  - Local Vite + uvicorn screenshots: whole-valley roads with arterials emphasised at valley zoom, and the full street grid north of the Ring Road at z14.6.
+- Not yet verified on the live site after deploy. The keep-warm workflow only proves itself after it has run on schedule.
+
 ## 2026-10-07 — One failed building tile no longer kills the map
 
 ### Goal
