@@ -351,14 +351,21 @@ export default function MapView({
     });
 
     // Surface fatal map errors instead of a silent blank canvas. Tile-level
-    // failures (e.g. a slow tile server) are warnings, not toasts.
+    // failures (e.g. a slow tile server) are warnings, not toasts. They carry
+    // `tile`/`sourceId`; checking isStyleLoaded() alone isn't enough, since it
+    // stays false while any tile is in flight, so a single tile that fails
+    // during the first load (API on Render still cold-starting) would count
+    // as fatal.
     map.on("error", (e) => {
       const ev = e as unknown as {
         error?: { message?: string };
         message?: unknown;
+        tile?: unknown;
+        sourceId?: string;
       };
       const msg = ev.error?.message ?? (typeof ev.message === "string" ? ev.message : String(e));
-      if (!map.isStyleLoaded()) {
+      const tileLevel = ev.tile !== undefined || ev.sourceId !== undefined;
+      if (!tileLevel && !map.isStyleLoaded()) {
         setError(`Map failed to start: ${msg}`);
       } else {
         console.warn("[terrasim map]", msg);

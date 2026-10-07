@@ -2,6 +2,31 @@
 
 Status ledger for terrasim. Most recent at the top. `plans.md` is the spec; this file records what physically exists and what was verified. Entries follow the development-log template (Goal / What we did / Problem / Solution / Result / Evidence) and only record what actually happened.
 
+## 2026-10-07 — One failed building tile no longer kills the map
+
+### Goal
+The live site showed a "Map failed to start: AJAXError: NetworkError … /tiles/buildings/13/6039/3441.pbf" toast. One building tile had failed while the API was unreachable. That can happen during a free-tier cold start, or during the redeploy that each push to `main` triggers.
+
+### What we did
+- **Frontend (`MapView.tsx`, `map.on("error")`).** Errors that carry `tile` or `sourceId`, i.e. tile and source load failures, are now always logged as `console.warn`. Only other errors raised before the style finishes loading show the "Map failed to start" toast.
+- No backend changes.
+
+### Problem
+The handler decided an error was fatal using `!map.isStyleLoaded()`. MapLibre's `Style.loaded()` returns false while any tile manager still has tiles in flight. So during the initial tile burst, a single failed tile counted as a startup failure. The comment above the handler had already intended tile failures to be warnings.
+
+### Solution
+Classify errors by their payload rather than by load state. MapLibre fires tile load errors as `ErrorEvent(err, {tile})`, which is tagged with `sourceId` once forwarded through the style.
+
+### Result
+A tile fetch that fails while the API is waking up leaves only a gap in the building layer. That tile fills in when the map re-requests it (pan or zoom), and the toast no longer appears.
+
+### Evidence
+Verified live:
+- `curl https://terrasim-api.onrender.com/api/health` returned 200 (0.6 s).
+- The same tile with `Origin: https://terrasim.rabidahal.com.np` returned 200 `application/x-protobuf` with a matching `access-control-allow-origin`, so CORS is fine and the failure was transient.
+- `npx tsc -b` and `npm run build` passed.
+- Not yet re-checked in a browser after this deploy.
+
 ## 2026-10-07 — Custom domain showed nothing (Render www redirect)
 
 ### Goal
