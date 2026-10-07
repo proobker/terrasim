@@ -172,3 +172,27 @@ def test_gzip_tile_is_cached():
     a = bt.tile_gzip("kathmandu", z, x, y)
     assert a is bt.tile_gzip("kathmandu", z, x, y)
     assert gzip.decompress(a) == bt.encode_tile(city, z, x, y)
+
+
+@pytest.mark.parametrize("city_id", ["kathmandu", "pokhara"])
+def test_committed_cache_is_fresh_regardless_of_mtime(city_id, monkeypatch):
+    """A fresh git checkout can stamp the npz older than its GeoJSON; the server
+    must still trust the committed cache instead of rebuilding (~900 MB peak,
+    which OOM-kills a 512 MB host)."""
+    import os
+
+    from app import datasets
+
+    src = datasets._layer_path(city_id, "buildings")
+    cache = src.with_name(bt.CACHE_NAME)
+    st = cache.stat()
+    os.utime(cache, ns=(st.st_atime_ns, src.stat().st_mtime_ns - 10**9))
+
+    def no_rebuild(_features):
+        raise AssertionError("rebuilt the committed cache")
+
+    monkeypatch.setattr(bt, "pack", no_rebuild)
+    try:
+        assert bt.ensure_cache(city_id) == cache
+    finally:
+        os.utime(cache, ns=(st.st_atime_ns, st.st_mtime_ns))

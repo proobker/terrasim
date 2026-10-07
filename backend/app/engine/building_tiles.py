@@ -224,17 +224,29 @@ def _from_packed(p) -> City:
 
 
 def ensure_cache(city_id: str) -> Path:
-    """Path to an up-to-date ``buildings.blocks.npz``, building it if needed."""
+    """Path to an up-to-date ``buildings.blocks.npz``, building it if needed.
+
+    Freshness is the source GeoJSON's byte size recorded in the npz, not
+    mtimes: a git checkout stamps files in arbitrary order, so on a fresh
+    deploy the committed npz often looks "older" than its GeoJSON — and the
+    rebuild (~900 MB peak) gets the 512 MB host OOM-killed before it serves.
+    """
     from app import datasets
 
     src = datasets._layer_path(city_id, "buildings")
     cache = src.with_name(CACHE_NAME)
-    if cache.is_file() and cache.stat().st_mtime_ns >= src.stat().st_mtime_ns:
+    src_size = src.stat().st_size
+    if cache.is_file():
         with np.load(cache) as p:
-            if int(p["version"]) == CACHE_VERSION:
+            if (
+                int(p["version"]) == CACHE_VERSION
+                and "src_size" in p.files
+                and int(p["src_size"]) == src_size
+            ):
                 return cache
     with src.open("r", encoding="utf-8") as fh:
         packed = pack(json.load(fh).get("features") or [])
+    packed["src_size"] = np.asarray(src_size, dtype=np.int64)
     tmp = cache.with_suffix(".tmp.npz")
     np.savez_compressed(tmp, **packed)
     tmp.replace(cache)

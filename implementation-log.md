@@ -2,6 +2,32 @@
 
 Status ledger for terrasim. Most recent at the top. `plans.md` is the spec; this file records what physically exists and what was verified. Entries follow the development-log template (Goal / What we did / Problem / Solution / Result / Evidence) and only record what actually happened.
 
+## 2026-10-07 — Deploy: stop the fresh-checkout npz rebuild that OOM-killed Render
+
+### Goal
+Get the backend live on Render again. The auto-deploy of `0400b0a` (building tiles) failed after 4m35s, so `terrasim-api` kept serving the old build (`64b7bd0`), which has no `/tiles/buildings` endpoint.
+
+### What we did
+- **Backend (`app/engine/building_tiles.py`).** `ensure_cache` no longer compares mtimes. It trusts `buildings.blocks.npz` when `version == CACHE_VERSION` and the stored `src_size` matches the GeoJSON's byte size. A rebuild now writes `src_size` into the npz.
+- **Data.** Regenerated both committed npz files so they carry `src_size` (Kathmandu 101,384,487, Pokhara 564,123). Every other array is byte-identical to the previous commit.
+- **Tests.** Added `test_committed_cache_is_fresh_regardless_of_mtime[kathmandu|pokhara]`, which backdates the npz below the GeoJSON's mtime and asserts `pack` is never called.
+- **Blueprint (`render.yaml`).** Fixed the `VITE_API_BASE` typo `https://terrasim-api.onrender.com.github/` → `https://terrasim-api.onrender.com`. The live bundle already used the correct URL, so a dashboard value was masking it; the next blueprint sync would have broken it.
+
+### Problem
+A fresh `git clone` stamps files in checkout order. In a clean clone, `kathmandu/buildings.blocks.npz` has mtime `…989.38` and `buildings.geojson` has `…989.88`, so the npz looked stale. On boot, `_warm_caches` called `ensure_cache`, which re-parsed the 97 MB GeoJSON (~900 MB peak, per the 2026-10-06 entry) on a 512 MB free instance. The instance was killed before the health check passed.
+
+### Solution
+Fingerprint the source by content size, which a checkout preserves, instead of by timestamps, which it does not.
+
+### Result
+The committed caches are accepted as-is on any checkout, so boot only loads the npz (~132 MB peak) instead of the GeoJSON.
+
+### Evidence
+- `uv run pytest` (backend): all pass, `tests/test_building_tiles.py` 16 passed.
+- Fresh-clone mtime check reproduced the inverted ordering above.
+- Before push: `GET https://terrasim-api.onrender.com/api/health` → 200 (old build, 34 s cold start); the live frontend bundle points at `https://terrasim-api.onrender.com`.
+- Not verified live: the Render deploy itself (no dashboard or log access from this session; Docker isn't running locally).
+
 ## 2026-10-06 — Map: one-colour imagery, buildings as vector tiles, 6.5 s cold boot
 
 ### Goal
