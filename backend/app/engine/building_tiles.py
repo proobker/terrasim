@@ -41,7 +41,7 @@ LAYER = "buildings"
 MIN_ZOOM = 13
 MAX_ZOOM = 15
 # Bump when the packing or styling rules change so stale caches rebuild.
-CACHE_VERSION = 1
+CACHE_VERSION = 2
 CACHE_NAME = "buildings.blocks.npz"
 COORD_SCALE = 1e7  # int32 coordinates at 1e-7 deg (~1 cm)
 
@@ -135,9 +135,30 @@ def _square(lng: float, lat: float, size_m: float, rot_deg: float) -> list:
     return [pts + [pts[0]]]
 
 
+def _exposure_point(geometry: dict | None, props: dict, cx: float, cy: float) -> tuple[float, float]:
+    """The one point hazard exposure samples for a building.
+
+    Same rule exposure applied to the raw GeoJSON: a polygon's precomputed
+    ``centroid`` property, a point's own coordinate, otherwise a point
+    guaranteed inside the footprint (first part of a multipolygon).
+    """
+    gtype = (geometry or {}).get("type")
+    centroid = props.get("centroid")
+    if gtype == "Polygon" and isinstance(centroid, (list, tuple)) and len(centroid) == 2:
+        return float(centroid[0]), float(centroid[1])
+    if gtype in ("Polygon", "MultiPolygon"):
+        from shapely.geometry import shape
+
+        geom = shape(geometry)
+        part = geom.geoms[0] if gtype == "MultiPolygon" else geom
+        x, y = part.representative_point().coords[0]
+        return float(x), float(y)
+    return cx, cy
+
+
 def pack(features: list[dict]) -> dict[str, np.ndarray]:
     """Pack GeoJSON building features into flat arrays (the npz payload)."""
-    ids, names, heights, colors, clng, clat = [], [], [], [], [], []
+    ids, names, heights, colors, clng, clat, alng, alat = [], [], [], [], [], [], [], []
     coords: list[list[float]] = []
     ring_len: list[int] = []
     bld_rings: list[int] = []
@@ -151,6 +172,7 @@ def pack(features: list[dict]) -> dict[str, np.ndarray]:
         else:
             pt = (f.get("geometry") or {}).get("coordinates") or [0, 0]
             cx, cy = float(pt[0]), float(pt[1])
+        alng_i, alat_i = _exposure_point(f.get("geometry"), props, cx, cy)
         fid = props.get("id")
         seed = str(fid) if fid is not None else f"{cx:.6f},{cy:.6f}"
         h = fnv1a(seed)
@@ -166,6 +188,8 @@ def pack(features: list[dict]) -> dict[str, np.ndarray]:
         colors.append(h % len(RANDOM_TINTS))
         clng.append(cx)
         clat.append(cy)
+        alng.append(alng_i)
+        alat.append(alat_i)
     xy = np.rint(np.asarray(coords, dtype=np.float64) * COORD_SCALE).astype(np.int32)
     name_table, name_idx = np.unique(np.asarray(names), return_inverse=True)
     return {
@@ -177,6 +201,8 @@ def pack(features: list[dict]) -> dict[str, np.ndarray]:
         "color": np.asarray(colors, dtype=np.uint8),
         "clng": np.asarray(clng, dtype=np.float64),
         "clat": np.asarray(clat, dtype=np.float64),
+        "alng": np.asarray(alng, dtype=np.float64),
+        "alat": np.asarray(alat, dtype=np.float64),
         "xy": xy.reshape(-1, 2),
         "ring_len": np.asarray(ring_len, dtype=np.int32),
         "bld_rings": np.asarray(bld_rings, dtype=np.int32),
@@ -262,6 +288,30 @@ def _city(path: Path, mtime_ns: int) -> City:
 def city(city_id: str) -> City:
     path = ensure_cache(city_id)
     return _city(path, path.stat().st_mtime_ns)
+
+
+@dataclass(frozen=True)
+class Points:
+    """Per-building exposure point, id and name (rows match ``pack`` order)."""
+
+    lng: np.ndarray
+    lat: np.ndarray
+    ids: np.ndarray  # OSM id, or -1 when the bundle has none
+    name_table: np.ndarray
+    name_idx: np.ndarray
+
+
+@lru_cache(maxsize=4)
+def _points(path: Path, mtime_ns: int) -> Points:
+    with np.load(path) as p:
+        return Points(p["alng"], p["alat"], p["ids"], p["name_table"], p["name_idx"])
+
+
+def points(city_id: str) -> Points:
+    """Buildings as exposure points, read from the npz (~10 MB) so a scenario
+    run never parses the 100 MB GeoJSON (~900 MB peak)."""
+    path = ensure_cache(city_id)
+    return _points(path, path.stat().st_mtime_ns)
 
 
 # --- MVT encoding -------------------------------------------------------------

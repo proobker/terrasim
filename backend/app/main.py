@@ -27,7 +27,7 @@ def _cors_origins() -> list[str]:
     return origins
 
 
-def _assets_for(scenario: FloodScenario | EarthquakeScenario) -> dict[str, list[dict]]:
+def _assets_for(scenario: FloodScenario | EarthquakeScenario) -> dict[str, list[dict] | exposure.PointAssets]:
     """Real OSM assets, or the planner's proposed layout when supplied."""
     if scenario.assets is not None:
         assets: dict[str, list[dict]] = {}

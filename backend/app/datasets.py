@@ -16,6 +16,8 @@ import json
 from functools import lru_cache
 from pathlib import Path
 
+from app.engine import building_tiles
+from app.engine.exposure import PointAssets
 from app.engine.grid import DemGrid, load_dem
 
 DATA_ROOT = Path(
@@ -93,14 +95,21 @@ def layer_gzip(city_id: str, kind: str) -> tuple[bytes, str]:
     return _gzipped(path, stat.st_mtime_ns), f'"{stat.st_mtime_ns:x}-{stat.st_size:x}"'
 
 
-def load_assets(city_id: str) -> dict[str, list[dict]]:
-    """Load buildings/roads/facilities as a list of lightweight asset dicts.
+def load_assets(city_id: str) -> dict[str, list[dict] | PointAssets]:
+    """Load buildings/roads/facilities for exposure.
 
-    Each dict carries ``id``, ``name``, ``kind`` and ``type`` (the mapped
-    OSM ''building'' / ''highway'' / amenity tag).
+    Roads and facilities are lists of lightweight asset dicts carrying ``id``,
+    ``name``, ``kind`` and ``type`` (the mapped OSM ''highway'' / amenity tag).
+    Buildings are a :class:`PointAssets` read from ``buildings.blocks.npz``:
+    parsing the 100 MB Kathmandu GeoJSON per run peaked at ~900 MB, more than
+    the 512 MB host has.
     """
-    assets: dict[str, list[dict]] = {}
-    for kind in ("buildings", "roads", "facilities"):
+    _layer_path(city_id, "buildings")  # FileNotFoundError for an unknown city
+    pts = building_tiles.points(city_id)
+    assets: dict[str, list[dict] | PointAssets] = {
+        "buildings": PointAssets("buildings", pts.lng, pts.lat, pts.ids, pts.name_table, pts.name_idx)
+    }
+    for kind in ("roads", "facilities"):
         fc = load_layer(city_id, kind)
         items = []
         for idx, feature in enumerate(fc.get("features", [])):

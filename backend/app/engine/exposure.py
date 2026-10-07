@@ -6,8 +6,10 @@ the estimated high-exposure zone" — never as deterministic damage.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
+import numpy as np
 from shapely.geometry import shape
 
 from app.engine import earthquake
@@ -15,6 +17,57 @@ from app.engine.earthquake import quake_zones_at
 from app.engine.grid import DemGrid
 
 _BAND_LABELS = {"high": "high", "medium_high": "medium_high", "medium": "medium", "low": "low"}
+
+
+@dataclass(frozen=True)
+class PointAssets:
+    """Many single-point assets held as arrays (a city's buildings).
+
+    Exposure classifies them in one numpy pass instead of one dict per asset
+    — results match the per-feature path exactly, in the same order.
+    """
+
+    kind: str
+    lng: np.ndarray
+    lat: np.ndarray
+    ids: np.ndarray  # int; negative means "positional": f"{kind}:{index}"
+    name_table: np.ndarray
+    name_idx: np.ndarray
+
+    def __len__(self) -> int:
+        return int(self.lng.size)
+
+    def id_at(self, i: int) -> Any:
+        fid = int(self.ids[i])
+        return fid if fid >= 0 else f"{self.kind}:{i}"
+
+    def name_at(self, i: int) -> str | None:
+        return str(self.name_table[self.name_idx[i]]) or None
+
+
+def _cells(grid: DemGrid, lng: np.ndarray, lat: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Vectorised ``DemGrid.cell`` (same truncation + clamping)."""
+    c = ((lng - grid.min_lng) / grid.res_lng).astype(np.int64)
+    r = ((grid.max_lat - lat) / grid.res_lat).astype(np.int64)
+    return np.clip(r, 0, grid.nrows - 1), np.clip(c, 0, grid.ncols - 1)
+
+
+def _quake_band_index(
+    grid: DemGrid, pa: PointAssets, epicenter_lng: float, epicenter_lat: float, magnitude: float, depth_km: float
+) -> np.ndarray:
+    """Index into ``earthquake.BANDS`` per asset; ``len(BANDS)`` means none.
+
+    Vectorised ``quake_zones_at`` + ``band_for``.
+    """
+    r = np.sqrt(
+        ((pa.lng - epicenter_lng) * grid.km_per_deg_lng(pa.lat)) ** 2
+        + ((pa.lat - epicenter_lat) * 111.32) ** 2
+    )
+    index = earthquake.intensity_index(r, depth_km, magnitude)
+    band = np.full(index.shape, len(earthquake.BANDS), dtype=np.int64)
+    for i in reversed(range(len(earthquake.BANDS))):
+        band[index >= earthquake.BAND_THRESHOLDS[i]] = i
+    return band
 
 
 def _densify(points, step_deg: float):
@@ -62,7 +115,7 @@ def _asset_points(feature: dict, step_deg: float) -> list[tuple[float, float]]:
 
 
 def evaluate_flood_exposure(
-    grid: DemGrid, assets: dict[str, list[dict]], flooded_mask
+    grid: DemGrid, assets: dict[str, list[dict] | PointAssets], flooded_mask
 ) -> dict:
     """Classify each asset as flooded/not flooded via the raster cell lookup."""
     step_deg = min(grid.res_lng, grid.res_lat) * 2
@@ -70,6 +123,14 @@ def evaluate_flood_exposure(
     affected_ids: list[dict] = []
 
     for kind, features in assets.items():
+        if isinstance(features, PointAssets):
+            hit = flooded_mask[_cells(grid, features.lng, features.lat)]
+            results[kind] = {"flooded": int(hit.sum()), "total": len(features)}
+            affected_ids.extend(
+                {"kind": kind, "name": features.name_at(i), "id": features.id_at(i)}
+                for i in np.flatnonzero(hit).tolist()
+            )
+            continue
         counts = {"flooded": 0, "total": 0}
         for feature in features:
             counts["total"] += 1
@@ -93,7 +154,7 @@ def evaluate_flood_exposure(
 
 def evaluate_quake_exposure(
     grid: DemGrid,
-    assets: dict[str, list[dict]],
+    assets: dict[str, list[dict] | PointAssets],
     epicenter_lng: float,
     epicenter_lat: float,
     magnitude: float,
@@ -109,6 +170,23 @@ def evaluate_quake_exposure(
         for band in earthquake.BANDS:
             counts[band] = 0
         counts["none"] = 0
+        if isinstance(features, PointAssets):
+            band_i = _quake_band_index(grid, features, epicenter_lng, epicenter_lat, magnitude, depth_km)
+            tally = np.bincount(band_i, minlength=len(earthquake.BANDS) + 1)
+            counts["total"] = len(features)
+            for i, band in enumerate(earthquake.BANDS):
+                counts[band] = int(tally[i])
+            counts["none"] = int(tally[-1])
+            for i in np.flatnonzero(band_i < len(earthquake.BANDS)).tolist():
+                band = earthquake.BANDS[band_i[i]]
+                if kind == "buildings":
+                    exposed.append({"id": features.id_at(i), "band": band})
+                else:
+                    exposed.append(
+                        {"kind": kind, "name": features.name_at(i), "id": features.id_at(i), "band": band}
+                    )
+            results[kind] = counts
+            continue
         for feature in features:
             counts["total"] += 1
             points = _asset_points(feature, step_deg)
@@ -140,7 +218,7 @@ def evaluate_quake_exposure(
     return {"assets": results, "exposed": exposed}
 
 
-def evaluate(grid: DemGrid, assets: dict[str, list[dict]], hazard: dict) -> dict:
+def evaluate(grid: DemGrid, assets: dict[str, list[dict] | PointAssets], hazard: dict) -> dict:
     """Dispatch to the right exposure evaluator based on the hazard kind."""
     kind = hazard["kind"]
     if kind == "flood":

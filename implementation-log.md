@@ -2,6 +2,41 @@
 
 Status ledger for terrasim. Most recent at the top. `plans.md` is the spec; this file records what physically exists and what was verified. Entries follow the development-log template (Goal / What we did / Problem / Solution / Result / Evidence) and only record what actually happened.
 
+## 2026-10-07 — Scenario exposure reads buildings from the npz (1004 → 272 MB peak)
+
+### Goal
+Fix the issue flagged on 2026-10-06: every flood/quake run re-parsed `buildings.geojson` through `load_assets`. That peaked around 1 GB, more than Render's 512 MB free tier, so the first scenario run would have killed the instance.
+
+### What we did
+- **Backend: npz (`building_tiles.py`).** `pack` now also stores each building's exposure point as `alng`/`alat`, chosen by `_exposure_point` with the same rule exposure used on the raw GeoJSON: a polygon's `centroid` property, otherwise a point's own coordinate, otherwise shapely `representative_point`. `CACHE_VERSION` is 1 → 2. The new `points(city_id)` loads only those arrays plus ids and names (lru-cached).
+- **Backend: exposure (`exposure.py`).** New `PointAssets`, which holds the buildings as arrays. `evaluate_flood_exposure` and `evaluate_quake_exposure` handle it in one numpy pass (vectorised `DemGrid.cell` and `quake_zones_at` + `band_for`). Counts and listed ids come out in the same order as before. Roads, facilities and planner-supplied assets keep the per-feature path.
+- **Backend: `datasets.load_assets`.** Buildings are now a `PointAssets` built from the npz. Roads and facilities still come from their (small) GeoJSON.
+- **Data.** Regenerated both npz files: Kathmandu 16.5 → 20.4 MB, Pokhara 148 → 205 KB.
+- **Tests.**
+  - New `test_point_assets_exposure_matches_per_feature_path[kathmandu|pokhara]` checks the vectorised path against the dict path, for quake and flood.
+  - The `city` fixture in `test_engine.py` set `datasets.DATA_ROOT` globally and never restored it, so every later test saw the synthetic bundle. It now uses `monkeypatch.setattr`.
+- **Docs.** The AGENTS.md npz gotcha now covers exposure points and the `src_size` freshness rule.
+
+### Problem
+`load_assets` called `load_layer("buildings")`, i.e. `json.load` of 101 MB. Then it built 362k asset dicts and classified them one by one, calling `quake_zones_at` once per building.
+
+### Solution
+Each building already needs only one exposure point, an id and a name, so ship those in the npz that's committed anyway and classify every building in a single array pass.
+
+### Result
+| Kathmandu M7.0 quake (cold process, after warm-up) | before | after |
+|---|---|---|
+| peak working set | 1004 MB | 272 MB |
+| request time (local) | 13.0 s | 4.8 s |
+
+- Kathmandu flood: 8.8 → 3.8 s.
+- The response is the same 13 MB, because the per-building `exposed` list is unchanged (the frontend tints by it). Shrinking it is a separate job.
+
+### Evidence
+- Snapshot script over 4 scenarios (Kathmandu and Pokhara × quake and flood): the `exposure` JSON is **identical** before and after (sha256 `d34caecf…`, `af47f5ec…`, `bb441a01…`, `719fe4aa…`).
+- Peak memory: Win32 `PeakWorkingSetSize` read in a cold process. The old code was measured with the matching v1 npz.
+- `uv run pytest` (backend): 55 passed.
+
 ## 2026-10-07 — Deploy: stop the fresh-checkout npz rebuild that OOM-killed Render
 
 ### Goal

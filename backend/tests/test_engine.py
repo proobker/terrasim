@@ -114,8 +114,8 @@ def make_city_bundle(tmp_path: Path, city_id: str = "testcity", n: int = 24) -> 
 
 
 @pytest.fixture
-def city(tmp_path):
-    datasets.DATA_ROOT = tmp_path
+def city(tmp_path, monkeypatch):
+    monkeypatch.setattr(datasets, "DATA_ROOT", tmp_path)
     return make_city_bundle(tmp_path)
 
 
@@ -601,3 +601,36 @@ def test_terrain_tile_padded_coverage(city):
     assert abs(got - expected) < 1.0
     # fully outside the padded box: no coverage
     assert terrain_tiles.tile(city.name, z, 0, 0) is None
+
+@pytest.mark.parametrize("city_id", ["kathmandu", "pokhara"])
+def test_point_assets_exposure_matches_per_feature_path(city_id):
+    """Buildings come from the npz as arrays; exposure on them must equal the
+    old per-GeoJSON-feature path, counts and listed ids, in order."""
+    grid = datasets.load_city_dem(city_id)
+    pts = datasets.load_assets(city_id)["buildings"]
+    n = min(len(pts), 6000)
+    fc = datasets.load_layer(city_id, "buildings")["features"][:n]
+    as_dicts = {
+        "buildings": [
+            {
+                "id": (f.get("properties") or {}).get("id") or f"buildings:{i}",
+                "name": (f.get("properties") or {}).get("name"),
+                "centroid": (f.get("properties") or {}).get("centroid"),
+                "geometry": f.get("geometry"),
+            }
+            for i, f in enumerate(fc)
+        ]
+    }
+    head = exposure.PointAssets(
+        "buildings", pts.lng[:n], pts.lat[:n], pts.ids[:n], pts.name_table, pts.name_idx[:n]
+    )
+    lng, lat = float(np.mean(head.lng)), float(np.mean(head.lat))
+    quake = (lng, lat, 6.5, 10.0)
+    assert exposure.evaluate_quake_exposure(grid, {"buildings": head}, *quake) == (
+        exposure.evaluate_quake_exposure(grid, as_dicts, *quake)
+    )
+    # A flood mask that splits the sample, so both outcomes are exercised.
+    mask = np.zeros(grid.elev.shape, dtype=bool)
+    mask[: grid.nrows // 2] = True
+    got = exposure.evaluate_flood_exposure(grid, {"buildings": head}, mask)
+    assert got == exposure.evaluate_flood_exposure(grid, as_dicts, mask)
