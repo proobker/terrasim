@@ -2,6 +2,34 @@
 
 Status ledger for terrasim. Most recent at the top. `plans.md` is the spec; this file records what physically exists and what was verified. Entries follow the development-log template (Goal / What we did / Problem / Solution / Result / Evidence) and only record what actually happened.
 
+## 2026-10-07 — Custom domain showed nothing (Render www redirect)
+
+### Goal
+Get `https://terrasim.rabidahal.com.np` to serve the frontend. Cloudflare DNS already pointed it at Render.
+
+### What we did
+- **Diagnosis.**
+  - DNS was correct: `terrasim.rabidahal.com.np` → CNAME `terrasim.onrender.com` (DNS only).
+  - `https://terrasim.onrender.com` returned 200.
+  - The custom domain returned `301 → https://www.terrasim.rabidahal.com.np/`, and that host was NXDOMAIN.
+- **Infra (Render dashboard, done by hand).** Removed the auto-added `www.` custom domain so the bare domain serves the site directly.
+- **Docs.** The README "Deploy on Render → Custom domain" step now explains the `www` trap, gives the Cloudflare CNAME fallback and the `curl -I` check, and says to keep the record DNS only.
+- No code, test, bundle or `render.yaml` changes. `CORS_ORIGINS` already listed the domain.
+
+### Problem
+Render reads `.com.np` as a TLD, so it treated `terrasim.rabidahal.com.np` as a root domain: it added a `www.` variant and redirected the bare domain to it. The `www` host had no DNS record, so browsers ended up with nothing.
+
+### Solution
+Drop the `www` entry on Render so there's no redirect. The fallback, if Render insists on the `www` entry, is a DNS-only `www.terrasim` CNAME in Cloudflare.
+
+### Result
+`https://terrasim.rabidahal.com.np` serves the app directly.
+
+### Evidence
+Verified live:
+- `curl -I https://terrasim.rabidahal.com.np` → `HTTP/1.1 200 OK`.
+- The page `<title>` is "terrasim — Building Resilient Areas".
+
 ## 2026-10-07 — Scenario exposure reads buildings from the npz (1004 → 272 MB peak)
 
 ### Goal

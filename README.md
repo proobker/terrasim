@@ -93,6 +93,14 @@ API as a Docker web service and the frontend as a static site.
 2. **Custom domain** (Settings → Custom Domains on the frontend service):
    - Point `terrasim.rabidahal.com.np` (CNAME) at the static-site target Render shows
      (e.g. `terrasim.onrender.com`). Add it as a custom domain.
+   - **Remove the auto-added `www.` domain.** Render reads `.com.np` as a TLD, so it
+     treats `terrasim.rabidahal.com.np` as a root domain, adds
+     `www.terrasim.rabidahal.com.np`, and 301-redirects the bare domain to it. That
+     `www` host has no DNS record, so the site shows nothing. Delete the `www` entry
+     in Custom Domains (or, failing that, add a DNS-only CNAME `www.terrasim` →
+     `terrasim.onrender.com` in Cloudflare). Check with
+     `curl -I https://terrasim.rabidahal.com.np`: it should return `200`, not `301`.
+   - Keep the Cloudflare record **DNS only** (grey cloud) so Render can issue the TLS cert.
    - The API stays on its Render URL (`terrasim-api.onrender.com`); no extra domain needed.
    - The blueprint already sets `VITE_API_BASE=https://terrasim-api.onrender.com`
      and `CORS_ORIGINS=https://terrasim.rabidahal.com.np,https://terrasim.onrender.com`,
