@@ -11,7 +11,9 @@ Each city lives in ``data/bundles/<city_id>/`` and contains:
 
 from __future__ import annotations
 
+import gzip
 import json
+from functools import lru_cache
 from pathlib import Path
 
 from app.engine.grid import DemGrid, load_dem
@@ -55,12 +57,40 @@ def load_city_dem(city_id: str) -> DemGrid:
     return load_dem(_city_dir(city_id))
 
 
+LAYER_KINDS = ("buildings", "roads", "facilities", "water", "rim")
+
+
+def _layer_path(city_id: str, kind: str) -> Path:
+    if kind not in LAYER_KINDS:
+        raise ValueError(f"unknown layer kind: {kind}")
+    path = _city_dir(city_id) / f"{kind}.geojson"
+    if not path.is_file():
+        raise FileNotFoundError(f"{city_id} has no {kind} layer")
+    return path
+
+
 def load_layer(city_id: str, kind: str) -> dict:
     """Return a GeoJSON FeatureCollection for buildings/roads/facilities/water/rim."""
-    if kind not in ("buildings", "roads", "facilities", "water", "rim"):
-        raise ValueError(f"unknown layer kind: {kind}")
-    with (_city_dir(city_id) / f"{kind}.geojson").open("r", encoding="utf-8") as fh:
+    with _layer_path(city_id, kind).open("r", encoding="utf-8") as fh:
         return json.load(fh)
+
+
+@lru_cache(maxsize=16)
+def _gzipped(path: Path, mtime_ns: int) -> bytes:
+    # mtime_ns is part of the cache key so a rebuilt bundle is re-read.
+    return gzip.compress(path.read_bytes(), compresslevel=5)
+
+
+def layer_gzip(city_id: str, kind: str) -> tuple[bytes, str]:
+    """Gzipped GeoJSON bytes of a layer file plus a validator ETag.
+
+    The bundle files are already GeoJSON, so the API ships them as-is: parsing
+    the 100 MB Kathmandu buildings file and letting FastAPI re-encode it took
+    ~25 s per request; compressed bytes held in memory go out in well under one.
+    """
+    path = _layer_path(city_id, kind)
+    stat = path.stat()
+    return _gzipped(path, stat.st_mtime_ns), f'"{stat.st_mtime_ns:x}-{stat.st_size:x}"'
 
 
 def load_assets(city_id: str) -> dict[str, list[dict]]:

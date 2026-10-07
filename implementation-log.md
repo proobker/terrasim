@@ -2,6 +2,121 @@
 
 Status ledger for terrasim. Most recent at the top. `plans.md` is the spec; this file records what physically exists and what was verified. Entries follow the development-log template (Goal / What we did / Problem / Solution / Result / Evidence) and only record what actually happened.
 
+## 2026-10-06 — Map: one-colour imagery, buildings as vector tiles, 6.5 s cold boot
+
+### Goal
+Fix the "incomplete loading" in the user's screenshot of the opening view. A hard horizontal colour seam crossed the valley, and buildings and roads hadn't appeared yet. Make the boot reveal a finished city quickly.
+
+### What we did
+- **Frontend: imagery seam (`MapView.tsx`).** `satellite` now has `minzoom: 12` (`SATELLITE_LO_MAXZOOM + 1`), so the sharp layer only ever shows Esri's z12+ mosaic. The `ts-satellite-lo` underlay (z≤11, now the distant ground) is colour-matched to it: `raster-saturation -0.2`, `raster-contrast -0.06`, `raster-brightness-min 0.08`.
+- **Backend: layer endpoint (`main.py`, `datasets.py`).** `/api/cities/{id}/layers/{kind}` ships the bundle file's bytes, gzipped once and cached (`datasets.layer_gzip`, keyed by mtime), with an `ETag` and a 304 on match. It no longer `json.load`s the file for FastAPI to re-encode. A start-up thread (`_warm_caches`) pre-gzips the small layers.
+- **Backend: building vector tiles (`app/engine/building_tiles.py`, new).**
+  - `GET /api/cities/{id}/tiles/buildings/{z}/{x}/{y}.pbf` serves Mapbox Vector Tiles at z13–15: gzip, `Cache-Control: public, max-age=3600`, 204 for an empty, out-of-range or unknown tile.
+  - Each building lands in exactly one tile, by its centroid, so there's no clipping and no double draws.
+  - `estimate_height` and `tint` (FNV-1a over UTF-16, `RANDOM_TINTS`) are ported from `buildings3d.ts` and bake each block's height and colour into the tile.
+  - The MVT/protobuf encoder is hand-written and vectorised with numpy, with no new dependency.
+  - Footprints are packed once into `data/bundles/<city>/buildings.blocks.npz` (int32 coords at 1e-7°): Kathmandu 15.7 MB, Pokhara 145 KB, committed with the bundles. It rebuilds when older than the GeoJSON or when `CACHE_VERSION` changes.
+  - `_warm_caches` loads the index and encodes z13 tiles over `hazard_bounds` and z14 over `bounds`.
+- **Frontend: buildings source.** `ts-infra-buildings` is now a `vector` source (`minzoom 13`, `maxzoom 15`, tiles set per city with `setTiles`) with `source-layer: "buildings"`. Hazard bands tint blocks through **feature state** (`setFeatureState` on numeric OSM ids, tracked in `bandedRef`) instead of re-`setData`-ing every block. The tooltip reads the band from `f.state`.
+  - `buildBlockFeatures`, `estimateHeight`, `typeDef`, `num`, `polygonCoords`, `ringCentroid` and `RANDOM_TINTS` are removed from `buildings3d.ts` (now dead). Planned assets keep `buildAssetBlocks` and `applyBands`.
+- **Frontend: boot gate.** The boot screen waits for the core tile preload *and* the city's layers to be drawn (20 s cap), with staged text ("terrain & imagery", "city layers", "building the city"). `onLoadProgress(fraction, stage)` is the new signature. A pulsing `.map-loading-chip` ("loading city layers…", `index.css`) shows while layers are still in flight after the reveal or after a city switch.
+- **Docs.** AGENTS.md lists `buildings.blocks.npz` and has a gotcha on regenerating and committing it.
+
+### Problem
+- **Seam:** maplibre drew z12 Esri tiles near the camera and z11 farther off, and Esri grades those zooms as different mosaics. Mean tile RGB over the valley was z11 `[66,68,30]` vs z12 `[78,78,61]`, with the blue channel about half, so a tile row became a hard yellow/grey line.
+- **Missing buildings:** the 362,022-footprint layer was 101 MB of JSON. The API re-encoded it in ~25 s, then the page spent 1.0 s in `JSON.parse` plus a 4.2 s main-thread task cloning it into maplibre's worker, then ~7.5 s tiling it. Buildings showed ~17–19 s after load.
+  - Splitting into 4 GeoJSON sources only cut the tiling (10.1 → 5.9 s).
+  - Loading by URL doesn't help either: maplibre v6's worker posts the parsed data *back* to the main thread (`maplibre-gl-worker-dev.mjs:683`, `result.data = params.data`).
+  - So any GeoJSON source means a whole-city structured clone.
+- The first tile prototype took 41 s to index with an 893 MB peak (`json.load`) and up to 42 s per z12 tile (per-ring numpy calls).
+
+### Solution
+- **Seam:** keep the two mosaics apart by zoom and colour-correct the far one. The paint values are a least-squares fit of 15 z11 tiles against their z12 children, as drawn with the sharp layer's own paint.
+- **Buildings:** serve them pre-cut and pre-styled as vector tiles, so the browser fetches only the few tiles in view. Pack the footprints into an npz once, and vectorise the encoder across all rings of a tile (dedupe, closing point, shoelace winding, deltas and command stream in numpy; one varint pass).
+
+### Result
+- No seam: one continuous colour from foreground to horizon at the opening view.
+- Cold boot (empty cache) reveals at **6.5 s** with nothing left loading. The last GeoJSON build took ~17–19 s.
+- At z15 over the centre, 87,781 blocks render with real footprints, the same tints, and the hover tooltip working ("Khulla Bazar · ~7 m est.").
+- A quake run tints blocks via feature state (71,011 high + 16,770 medium-high in view) without re-uploading geometry.
+- Tile encode: busiest z13 tile 0.73 s (52,774 blocks, 0.83 MB gz), z14 0.22 s, z15 0.06 s, all cached. The npz index loads in 0.42 s with a 132 MB peak.
+- Not fixed, flagged: `/api/simulate/earthquake` still takes ~17 s and returns 13 MB, because `load_assets` re-parses `buildings.geojson` on every run (~900 MB peak, likely too much for Render's free tier). The frontend tint waits on it.
+
+### Evidence
+Verified live on a local backend (8000) and Vite (5173) in Chrome via DevTools, in fresh isolated browser contexts:
+- **Seam:** screenshot of the default opening view before and after; mean tile RGB per zoom measured in-page.
+- **Layer endpoint:** buildings layer 200 at 18.1 MB gz in 0.25 s, 304 on revalidate, rim still 404.
+- **Boot:** timeline sampled from the boot screen; `queryRenderedFeatures` on `ts-infra-buildings` / `ts-infra-roads`; per-tile encode timings in Python.
+- **Parity:** Python height, colour and id vs the TS `buildBlockFeatures` for all 362,022 Kathmandu buildings: 0 mismatches.
+- **Checks.** `uv run pytest`: 51 passed (37 + 14 new in `tests/test_building_tiles.py`: height/tint parity cases, tiles decoded back to source footprints within 0.75 units with MVT winding, one-tile-per-building, endpoint 200/204, gzip cache). `npx tsc -b` passes. `npm run lint` passes (only the existing `ExposurePanel.tsx` warning). `npm run build` passes.
+
+## 2026-10-06 — Map: no see-through holes while panning + forced tile preload
+
+### Goal
+Fix the glitch in the user's screen recording: while dragging the 3D map, tile-sized patches went see-through (dark-green page background), and neighbouring tiles hung stretched-imagery "curtains" into the gap. Also make the first load feel solid by preloading tiles behind the boot screen.
+
+### What we did
+- **Frontend: imagery fallback (`MapView.tsx`).** Two layers now sit under `ts-satellite`. `ts-ground` is a `background` layer (`#6b6a4c`). `ts-satellite-lo` uses a new `satellite-lo` source: the same Esri URL (now `SATELLITE_TILES`), capped at `maxzoom` 11 (`SATELLITE_LO_MAXZOOM`), with the same paint as the sharp layer.
+- **Frontend: DEM cap.** The `dem` source `maxzoom` drops from 15 to 12 (`DEM_MAXZOOM`). SRTM is ~30 m and terrarium z12 is ~34 m/px at Nepal's latitude, so z13–15 were upsampled copies of the same data.
+- **Frontend: forced preload (`prefetch.ts`, new).** `tileUrls()` lists the slippy tiles over a bounds and zoom range. `prefetch()` fetches them with bounded concurrency into the browser HTTP cache. S3 sends a 2017 `Last-Modified` and Esri sends `max-age=86400`, so maplibre then reads them from cache.
+  - Per city, the **core** set (Kathmandu 86 tiles: 55 underlay z8–11 over the hazard bounds padded 100%, 31 DEM z8–11 padded 50%) is preloaded first, underlay before DEM.
+  - The **detail** set (Kathmandu 498 tiles: DEM z12, imagery z12–13 padded 50%, imagery z14 over the hazard bounds) streams at concurrency 4 after the core set finishes. Pokhara is 47 core and 212 detail.
+- **Frontend: boot gate.** `onReady` no longer fires when the map is constructed. On the first city it fires once the core preload is done *and* the opening view is idle, with an 8 s overall cap. The new `onLoadProgress` prop drives the boot screen: `App.tsx`'s `BootScreen` shows "loading terrain & imagery… N%" with a real bar instead of a fixed 70%.
+- **Frontend: WebGL context loss.** `webglcontextlost` sets `mapLoaded` false; `webglcontextrestored` sets it back true after `style.load`. Previously any effect after a context loss called into `map.style === null` and React unmounted the whole app (blank page). `webgl2Available()` now releases its probe context (`WEBGL_lose_context`) instead of leaking one per mount.
+
+### Problem
+Under terrain, maplibre composites each terrain tile's draped layers into a render-to-texture. While panning into new ground, the Esri tiles for that area weren't loaded and no lower-zoom parent was cached, so the composite was transparent. The page background showed through, and the skirts of tiles behind it, normally hidden, read as stretched curtains.
+
+A per-frame probe over a cold-cache scripted pan found terrain tiles with no imagery in **74% of frames (201/271), up to 23 tiles at once**. The DEM was not the culprit: 0 tiles fell back to the flat 0 m DEM. A separate blank-page crash seen during testing was a WebGL context loss ("Too many active WebGL contexts", with several map tabs open) followed by an effect touching the destroyed style.
+
+### Solution
+Always have *something* to drape. A coarse z11 copy of the same imagery covers the valley in about 55 tiles and is cached before the reveal, so a still-loading tile shows blurry ground instead of a hole. A background colour covers the far horizon, where maplibre's raster coverage stops short of the terrain's. Preloading puts the sharp z12–14 fallback in cache, so the sharp layer fills in from cache (~14 ms) rather than the network (85–150 ms Esri, 1–4 s S3).
+
+### Result
+- Mid-pan screenshots over unvisited ground and over the city show no see-through tiles and no curtains. Freshly entered ground is briefly blurry, Google Earth-style, then sharpens.
+- Near-camera tiles with no imagery went from 74% of frames to **0**. The only imagery-less tiles left are z≤10 tiles on the far horizon, outside maplibre's raster covering range; they now paint `ts-ground` under the haze.
+- Cold-cache boot revealed at 7.1 s and 8.2 s from navigation in two runs. An earlier draft that blocked on all 304 tiles took 19 s.
+- Forcing a context loss with `WEBGL_lose_context`, toggling a layer checkbox while lost, then restoring gives back all 21 layers, terrain, and the building data, with no errors and the app still mounted.
+
+### Evidence
+Verified live on a local backend (8000) and Vite (5173) in Chrome via DevTools, using fresh isolated browser contexts (cold HTTP cache) and one map tab:
+- **Frame probe.** Per `render`, terrain tiles from `terrain.tileManager.getRenderableTiles()` were checked against `renderToTexture._coordsAscending` for loaded `satellite` / `satellite-lo` tiles and a DEM via `getSourceTile(…, true)`. Same 4-pose `easeTo` route as the baseline. Before: 201/271 frames with imagery-less tiles, max 23. After: 0 near-camera, 0 flat-DEM frames, 40% of frames with at least one blurry fallback tile.
+- **Resource timing** (buffer raised to 10 000) during a pan inside the preloaded ring: Esri z10–14 p50 11–22 ms (cache), z15–17 p50 85–148 ms (network); DEM z11–12 4–23 ms.
+- **Checks.** `npx tsc -b` passes. `npm run lint` passes (only the existing `ExposurePanel.tsx` warning). `npm run build` passes (existing >500 kB chunk warning).
+
+## 2026-10-06 — Map: Google Earth-style terrain, no more white walls/spikes
+
+### Goal
+Kill the 3D-map glitches (white translucent band across the city, white wedge, white "cracks", a tall spike at the edge) and make the terrain read like Google Earth: real imagery over real mountains with the Himalaya on the horizon.
+
+### What we did
+- **Frontend (`MapView.tsx`).** The `dem` raster-dem source now points at the global, keyless AWS Terrain Tiles (`elevation-tiles-prod/terrarium`, 256 px, maxzoom 15) instead of `/api/cities/{id}/terrain`. `DEM_PAD`/`padBounds` and the per-city `setTiles` are gone, and `applyTerrain(map, enabled)` lost its city/bounds args. Exaggeration is now 1.2 (was 1.3).
+- **Base map.** Esri World Imagery replaces the hue-rotated OSM raster. Paint is `raster-saturation 0.1`, `raster-contrast 0.08`, `raster-fade-duration 0`.
+- **Sky.** Blue zenith `#3f7fc4`, pale horizon `#d6e6f2`, haze fog `#c9dbe8`, `fog-ground-blend 0.6`, and `atmosphere-blend` interpolated by zoom (1 → 0.4 from z10 to z14). `maxPitch` raised to 75.
+- **Camera fit.** `fitBounds` gets right padding equal to how much the floating Scenario Lab panel covers the map (capped at 45% of the map width), so the valley is no longer framed under the panel.
+- **Overlay refresh.** New `sourcedata` hook: when a `ts-*` GeoJSON source finishes a `content` update, the terrain RTT is released on the next `idle`. Previously the post-`setData` refresh ran before the worker had parsed the data, so quake zones stayed invisible until the camera moved.
+- **Overlay legibility.** Quake band `fill-opacity` raised from 0.34 to 0.46 so the medium and medium-high rings show over the tan valley imagery.
+- **Attribution.** Moved to bottom-left and no longer compact ("Terrain © Mapzen/AWS | Imagery © Esri, Maxar, Earthstar Geographics"). The bottom-right spot sat under the panel, and maplibre's white background now loses to a higher-specificity dark style (`index.css`).
+- **Dev hook.** `window.__terrasimMap` is set in dev builds only (`import.meta.env.DEV`) so browser smoke tests can drive the camera. `api.terrainUrl` was removed because nothing uses it.
+- **Docs.** README attribution adds AWS Terrain Tiles and Esri imagery. TECH_STACK notes that the map no longer renders from `terrain_tiles.py`.
+
+### Problem
+The backend DEM endpoint only covers the city DEM plus a 50% pad, and the pad is edge-clamped. Past the pad, tiles 404, so maplibre falls back to a flat 0 m plane. That left a ~1300 m cliff at the coverage edge. With fog on, its walls rendered as the white band and wedge, and the edges showed as spikes and cracks. The bundle DEM itself is clean (Kathmandu 819–2832 m, Pokhara 587–2143 m, no NaN), so the bug was coverage, not data.
+
+### Solution
+Render from a global DEM so there is no coverage edge left to fall off. The simulations still run on the bundle DEM, and both datasets are SRTM lineage, so the draped results still line up with the ground.
+
+### Result
+No walls, wedges, spikes or cracks at any tested angle. In Kathmandu and Pokhara the Himalaya and Annapurna ranges are visible on the horizon, and the city sits beside the panel instead of under it. Earthquake zones drape onto the terrain without a camera nudge, and the suitability zones in Pokhara follow the hills. Turning 3D terrain off and back on works.
+
+### Evidence
+Verified live on a local backend (8000) and Vite (5173, strictPort) in Chrome via DevTools:
+- **Cliff test.** A scripted check sampled `queryTerrainElevation` on 60×60 and 50×50 grids at 8 camera poses (z9–13.5, pitch 55–75, bearings 0/45/120/180/-90). The steepest step between neighbouring samples was 0.77–1.26 (≈ 38–52°, real mountain slope), with 0 missing samples. A 0 m cliff would score ≥ 5.
+- **Interaction.** Pointer-event pan and right-drag rotate were screenshotted mid-load with no walls.
+- **Scenario.** An M6.5 earthquake run in Kathmandu rendered 8 zones without moving the camera.
+- **Console.** Only errors were the existing `layers/rim` 404s.
+- **Checks.** `npm run build` and `npm run lint` pass (one existing warning in `ExposurePanel.tsx`). `uv run pytest`: 37 passed.
+
 ## 2026-09-24 — Deploy: Render blueprint + GitHub hardening
 
 ### Goal

@@ -221,6 +221,13 @@ Slices the DEM into standard map tiles, encodes each as a **Terrarium** RGB PNG
 ground. Written with zero dependencies (hand-rolled PNG writer) so the runtime
 server doesn't need Pillow.
 
+> The map no longer *renders* from this endpoint. A city-only DEM ends at its
+> coverage box, and past it MapLibre falls back to a flat 0 m plane — the
+> ~1300 m cliff showed as white fogged walls and spikes. The 3D map now drapes
+> Esri World Imagery over the global, keyless **AWS Terrain Tiles** (Terrarium,
+> SRTM-derived), so the Himalaya reach the horizon with no edge. The bundle DEM
+> still drives every simulation; the endpoint stays for tooling and tests.
+
 ---
 
 ## 8. Where the data comes from (the pipeline)

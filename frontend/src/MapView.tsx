@@ -8,11 +8,19 @@ import { useEffect, useRef, useState } from "react";
 // Vite emits/`?worker&url`-bundles before any Map is constructed.
 maplibregl.setWorkerUrl(maplibreWorkerUrl);
 import { api } from "./api";
-import { applyBands, bandsFromResult, buildAssetBlocks, buildBlockFeatures } from "./buildings3d";
+import { applyBands, bandsFromResult, buildAssetBlocks } from "./buildings3d";
 import { atlasDefinitions, iconForType } from "./pixelIcons";
+import { padBounds, prefetch, tileUrls } from "./prefetch";
 import { useStore } from "./store";
-import type { BlockFeature } from "./buildings3d";
 import type { FeatureCollection, GeoFeature, PointLngLat } from "./types";
+
+// City buildings arrive as vector tiles cut by the backend
+// (backend/app/engine/building_tiles.py): the browser only fetches the tiles
+// in view instead of cloning and re-tiling ~362k footprints on every load.
+const BUILDINGS = "ts-infra-buildings";
+const BUILDINGS_SOURCE_LAYER = "buildings";
+const buildingTilesUrl = (cityId: string) =>
+  `${api.base}/api/cities/${cityId}/tiles/buildings/{z}/{x}/{y}.pbf`;
 
 // Layer order, bottom -> top. Re-applied whenever a layer is added/removed.
 const LAYER_ORDER = [
@@ -25,7 +33,7 @@ const LAYER_ORDER = [
   "ts-drawn-river",
   "ts-overlay",
   "ts-flood-shore",
-  "ts-infra-buildings",
+  BUILDINGS,
   "ts-valley-rim",
   "ts-infra-roads",
   "ts-infra-facilities",
@@ -53,7 +61,12 @@ function fc(
 
 function webgl2Available(): boolean {
   try {
-    return !!document.createElement("canvas").getContext("webgl2");
+    const gl = document.createElement("canvas").getContext("webgl2");
+    // Release the probe right away: Chrome caps live WebGL contexts (~16) and
+    // evicts the *oldest* — every leaked probe (StrictMode, HMR remounts)
+    // pushes the real map's context closer to being lost.
+    gl?.getExtension("WEBGL_lose_context")?.loseContext();
+    return !!gl;
   } catch {
     return false;
   }
@@ -89,50 +102,63 @@ function scheduleTerrainRefresh(map: maplibregl.Map) {
   });
 }
 
-// The DEM/tile renderer mirrors the backend's coverage padding (PAD_FRAC).
-const DEM_PAD = 0.5;
+// Global SRTM-derived terrarium DEM (AWS Terrain Tiles, keyless). The mesh is
+// rendered from a *global* source so it never falls off a coverage edge: the
+// old city-only DEM 404'd past its padded box, maplibre dropped to a flat 0 m
+// plane there, and the ~1300 m cliff read as white fogged walls and spikes.
+// The flood/quake engines still run on the bundle DEM (same SRTM lineage).
+const GLOBAL_DEM_TILES = [
+  "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png",
+];
+// SRTM is ~30 m; terrarium z12 is ~34 m/px at Nepal's latitude, so z13-15 are
+// upsampled copies of the same data. Capping here means one DEM tile covers a
+// ~9 km square at any camera zoom — far fewer fetches while panning close in.
+const DEM_MAXZOOM = 12;
 
-function padBounds(
-  bounds: [number, number, number, number],
-): [number, number, number, number] {
-  const dx = (bounds[2] - bounds[0]) * DEM_PAD;
-  const dy = (bounds[3] - bounds[1]) * DEM_PAD;
-  return [bounds[0] - dx, bounds[1] - dy, bounds[2] + dx, bounds[3] + dy];
-}
+const SATELLITE_TILES = [
+  "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+];
+// The coarse imagery underlay stops here: a handful of tiles covers the whole
+// valley, so it is always loaded by the time the sharp tiles are still in flight.
+// It is also the seam between two differently graded Esri mosaics — z<=11 is
+// yellow-green (blue channel ~1/2 of z12's over the same ground) — so the sharp
+// layer starts at z12 and the underlay is colour-matched to it, instead of the
+// two meeting as a hard band mid-valley.
+const SATELLITE_LO_MAXZOOM = 11;
 
-function applyTerrain(
-  map: maplibregl.Map,
-  cityId: string,
-  bounds: [number, number, number, number],
-  enabled: boolean,
-) {
-  const existing = map.getSource("dem") as
-    | maplibregl.RasterDEMTileSource
-    | undefined;
-  const tiles = [api.terrainUrl(cityId)];
-  if (existing) {
-    existing.setTiles(tiles);
-  } else {
+function applyTerrain(map: maplibregl.Map, enabled: boolean) {
+  if (!map.getSource("dem")) {
     map.addSource("dem", {
       type: "raster-dem",
-      tiles,
-      // DEM tiles are 512px and maplibre v6 terrain composites each to a 2x
-      // RTT of the *declared* size — declare the true tile size so the mesh
-      // grid lines up with the draped raster instead of smearing it.
-      tileSize: 512,
-      minzoom: 7,
-      maxzoom: 15,
-      bounds: padBounds(bounds),
+      tiles: GLOBAL_DEM_TILES,
+      tileSize: 256,
+      maxzoom: DEM_MAXZOOM,
       encoding: "terrarium",
+      attribution: "Terrain © Mapzen/AWS",
     });
   }
   if (enabled) {
-    map.setTerrain({ source: "dem", exaggeration: 1.3 });
+    map.setTerrain({ source: "dem", exaggeration: 1.2 });
+    // Google Earth-style atmosphere: deep blue zenith, pale horizon haze that
+    // swallows distant ridges, fading out as the camera zooms in close.
     map.setSky({
-      "sky-color": "#0f1b3a",
-      "horizon-color": "#8fb4c4",
-      "fog-color": "#dde5e6",
-      "fog-ground-blend": 0.55,
+      "sky-color": "#3f7fc4",
+      "horizon-color": "#d6e6f2",
+      "fog-color": "#c9dbe8",
+      "fog-ground-blend": 0.6,
+      "horizon-fog-blend": 0.6,
+      "sky-horizon-blend": 0.7,
+      "atmosphere-blend": [
+        "interpolate",
+        ["linear"],
+        ["zoom"],
+        0,
+        1,
+        10,
+        1,
+        14,
+        0.4,
+      ],
     });
   } else {
     map.setTerrain(null);
@@ -145,15 +171,27 @@ function applyTerrain(
   }
 }
 
-export default function MapView({ onReady }: { onReady?: () => void }) {
+export default function MapView({
+  onReady,
+  onLoadProgress,
+}: {
+  onReady?: () => void;
+  onLoadProgress?: (fraction: number, stage: string) => void;
+}) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const initializedCity = useRef<string | null>(null);
+  // The boot screen holds until the first city's tiles are preloaded.
+  const readyFired = useRef(false);
+  const prefetchAbort = useRef<AbortController | null>(null);
   const webgl2 = useRef<boolean>(webgl2Available());
   // maplibre v6 only allows style mutations after the style has loaded.
   const [mapLoaded, setMapLoaded] = useState(false);
   // Hover label over the voxel blocks (position + copy).
   const [tip, setTip] = useState<{ x: number; y: number; text: string } | null>(null);
+  // City layers (roads/buildings/...) fetched but not yet drawn; shown as an
+  // in-map chip so a half-built city never passes for a finished one.
+  const [layersPending, setLayersPending] = useState(false);
 
   const city = useStore((s) => s.city);
   const mode = useStore((s) => s.mode);
@@ -178,9 +216,8 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
   const facilitiesRef = useRef<Map<string, GeoFeature>>(new Map());
   // Water-layer features keyed by OSM id, for drawing the selected river.
   const waterRef = useRef<Map<string, GeoFeature>>(new Map());
-  // Raw centroid buildings (per city) and their stylised 3D block features.
-  const buildingsRef = useRef<GeoFeature[]>([]);
-  const blocksRef = useRef<BlockFeature[]>([]);
+  // Building ids currently tinted through feature state.
+  const bandedRef = useRef<Set<number>>(new Set());
   // Valley-rim line (dashed boundary of the sim basin), per city.
   const rimRef = useRef<FeatureCollection | null>(null);
   // Brush used to draw the quake pulse halo; kept in a ref so the rAF loop
@@ -217,29 +254,55 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
       style: {
         version: 8,
         sources: {
-          osm: {
+          satellite: {
             type: "raster",
-            tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+            tiles: SATELLITE_TILES,
             tileSize: 256,
-            attribution: "© OpenStreetMap contributors",
+            attribution: "Imagery © Esri, Maxar, Earthstar Geographics",
+            minzoom: SATELLITE_LO_MAXZOOM + 1,
             maxzoom: 19,
+          },
+          "satellite-lo": {
+            type: "raster",
+            tiles: SATELLITE_TILES,
+            tileSize: 256,
+            maxzoom: SATELLITE_LO_MAXZOOM,
           },
         },
         layers: [
+          // Under terrain, a draped tile with no imagery yet renders
+          // transparent: the page shows through and the neighbours' skirts
+          // read as stretched curtains. These two layers sit under the sharp
+          // imagery so a still-loading tile is blurry ground, never a hole.
           {
-            id: "ts-osm",
+            id: "ts-ground",
+            type: "background",
+            paint: { "background-color": "#6b6a4c" },
+          },
+          {
+            id: "ts-satellite-lo",
             type: "raster",
-            source: "osm",
-            // FireRed treatment: pull the stock OSM tiles toward the muted
-            // greens/teals of the palette so they read as a stylised base
-            // under the voxel blocks, not a default-looking web map.
+            source: "satellite-lo",
+            // Least-squares fit of z11 tile colours to their z12 children
+            // (as drawn by ts-satellite) over 15 tiles around Kathmandu: RMS
+            // gap 35 -> 15 /255. Desaturating lifts the starved blue channel.
             paint: {
-              "raster-opacity": 0.55,
-              "raster-saturation": -0.6,
-              "raster-hue-rotate": 55,
-              "raster-brightness-min": 0.78,
-              "raster-brightness-max": 0.98,
-              "raster-contrast": 0.15,
+              "raster-saturation": -0.2,
+              "raster-contrast": -0.06,
+              "raster-brightness-min": 0.08,
+              "raster-fade-duration": 0,
+            },
+          },
+          {
+            id: "ts-satellite",
+            type: "raster",
+            source: "satellite",
+            // Google Earth-style ground: real imagery draped over the global
+            // DEM. A light contrast/saturation lift keeps the hazy Himalayan
+            // imagery from reading washed out under the sky fog.
+            paint: {
+              "raster-saturation": 0.1,
+              "raster-contrast": 0.08,
               // Terrain composites the base map into an RTT; the stock fade
               // causes the raster to shimmer to white at every layer tile as
               // it loads in, which looks like stretched translucent faces over
@@ -252,18 +315,40 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
       center: [85.34, 27.7],
       zoom: 12,
       pitch: 55,
+      maxPitch: 75,
       attributionControl: false,
       canvasContextAttributes: { antialias: true },
     });
 
-    map.addControl(
-      new maplibregl.AttributionControl({ compact: true }),
-      "bottom-right",
-    );
+    // Bottom-right sits under the Scenario Lab panel; keep the (required)
+    // imagery credit visible beside the zoom buttons instead.
     map.addControl(
       new maplibregl.NavigationControl({ showCompass: false }),
       "bottom-left",
     );
+    map.addControl(
+      new maplibregl.AttributionControl({ compact: false }),
+      "bottom-left",
+    );
+
+    // GeoJSON setData parses in a worker, so a refresh scheduled right after it
+    // can land before the new features exist and leave the draped overlay
+    // missing until the camera moves. Recompose once each overlay source has
+    // actually re-tiled its new data (camera-driven tile loads don't count).
+    let refreshOnIdle = false;
+    map.on("sourcedata", (e) => {
+      if (
+        e.sourceId?.startsWith("ts-") &&
+        e.sourceDataType === "content" &&
+        !refreshOnIdle
+      ) {
+        refreshOnIdle = true;
+        map.once("idle", () => {
+          refreshOnIdle = false;
+          scheduleTerrainRefresh(map);
+        });
+      }
+    });
 
     // Surface fatal map errors instead of a silent blank canvas. Tile-level
     // failures (e.g. a slow tile server) are warnings, not toasts.
@@ -278,6 +363,16 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
       } else {
         console.warn("[terrasim map]", msg);
       }
+    });
+
+    // On WebGL context loss maplibre destroys the style (map.style = null) and
+    // re-applies a serialized copy on restore. Pause every style-touching
+    // effect meanwhile — one setLayoutProperty on the dead style would throw
+    // and blank the whole app.
+    map.on("webglcontextlost", () => setMapLoaded(false));
+    map.on("webglcontextrestored", () => {
+      if (map.isStyleLoaded()) setMapLoaded(true);
+      else map.once("style.load", () => setMapLoaded(true));
     });
 
     // Style mutations (images/sources/layers) must wait for the style to load —
@@ -307,7 +402,16 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
       ]) {
         map.addSource(id, QUIET_SRC as never);
       }
-      map.addSource("ts-infra-buildings", QUIET_SRC as never);
+      // Tile URL is set per city (setTiles). The backend serves z13-15 — below
+      // that a block is a sub-pixel speck — and maplibre overscales past z15.
+      // Features carry their OSM id, so a sim run tints blocks through
+      // feature state rather than re-sending any geometry.
+      map.addSource(BUILDINGS, {
+        type: "vector",
+        tiles: [],
+        minzoom: 13,
+        maxzoom: 15,
+      });
       map.addSource("ts-infra-roads", QUIET_SRC as never);
       map.addSource("ts-infra-facilities", QUIET_SRC as never);
       map.addSource("ts-plan-assets", QUIET_SRC as never);
@@ -408,7 +512,9 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
             "#1E7A99",
             "#43C7D8",
           ],
-          "fill-opacity": ["match", ["get", "class"], "flood-deep", 0.7, "flood", 0.55, 0.34],
+          // Quake bands sit over satellite imagery now; 0.34 let the tan
+          // valley floor swallow the medium/medium-high rings.
+          "fill-opacity": ["match", ["get", "class"], "flood-deep", 0.7, "flood", 0.55, 0.46],
         },
         layout: { visibility: "none" },
       });
@@ -424,15 +530,16 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
         layout: { visibility: "none" },
       });
       map.addLayer({
-        id: "ts-infra-buildings",
+        id: BUILDINGS,
         type: "fill-extrusion",
-        source: "ts-infra-buildings",
+        source: BUILDINGS,
+        "source-layer": BUILDINGS_SOURCE_LAYER,
         paint: {
-          // A hazard band (from a sim run) tints the whole block; silent
-          // blocks keep their silhouette colour.
+          // A hazard band (feature state, from a sim run) tints the whole
+          // block; silent blocks keep their silhouette colour.
           "fill-extrusion-color": [
             "match",
-            ["get", "band"],
+            ["coalesce", ["feature-state", "band"], ""],
             "flood",
             "#43C7D8",
             "high",
@@ -572,7 +679,6 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
         },
       });
 
-      onReady?.();
       setMapLoaded(true);
     });
 
@@ -675,7 +781,8 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
       }
       map.getCanvas().style.cursor = "pointer";
       const p = (f.properties ?? {}) as Record<string, unknown>;
-      const band = p.band as string | undefined;
+      // City blocks carry their band in feature state, planned blocks in props.
+      const band = (f.state?.band ?? p.band) as string | undefined;
       const tag = band
         ? band === "flood"
           ? "estimated flooded"
@@ -690,16 +797,18 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
           (tag ? ` · ${tag}` : ""),
       });
     };
-    map.on("mousemove", "ts-infra-buildings", (e) =>
-      tipFrom(e, e.features?.[0]),
-    );
-    map.on("mouseleave", "ts-infra-buildings", (e) => tipFrom(e, undefined));
+    map.on("mousemove", BUILDINGS, (e) => tipFrom(e, e.features?.[0]));
+    map.on("mouseleave", BUILDINGS, (e) => tipFrom(e, undefined));
     map.on("mousemove", "ts-plan-3d", (e) => tipFrom(e, e.features?.[0]));
     map.on("mouseleave", "ts-plan-3d", (e) => tipFrom(e, undefined));
 
     mapRef.current = map;
-    onReady?.();
+    // Dev-only handle so browser smoke tests can drive the camera.
+    if (import.meta.env.DEV) {
+      (window as unknown as { __terrasimMap?: maplibregl.Map }).__terrasimMap = map;
+    }
     return () => {
+      prefetchAbort.current?.abort();
       map.remove();
       mapRef.current = null;
     };
@@ -715,34 +824,92 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
 
     const target =
       city.hazard_bounds ?? (city.bounds as [number, number, number, number]);
+    // The Scenario Lab panel floats over the right of the map; keep the fitted
+    // valley clear of it instead of framing the city underneath the panel.
+    const panel = document.querySelector(".side-panel")?.getBoundingClientRect();
+    const mapRect = map.getContainer().getBoundingClientRect();
+    // Capped so a narrow (phone) layout can't pad the fit into an empty box.
+    const panelCover = panel
+      ? Math.min(mapRect.width * 0.45, Math.max(0, mapRect.right - panel.left))
+      : 0;
     map.fitBounds(
       [
         [target[0], target[1]],
         [target[2], target[3]],
       ],
-      { padding: 60, duration: 600 },
+      {
+        padding: { top: 60, bottom: 60, left: 60, right: panelCover + 40 },
+        duration: 600,
+      },
     );
     // The fitBounds camera sweep churns terrain RTT caches unevenly; recompose
     // everything once it settles so no flat tile lingers at rest.
     map.once("moveend", () => scheduleTerrainRefresh(map));
 
-    applyTerrain(
-      map,
-      city.id,
-      city.hazard_bounds ?? (city.bounds as [number, number, number, number]),
-      useStore.getState().terrain3d,
-    );
+    applyTerrain(map, useStore.getState().terrain3d);
 
-    void Promise.all([
-      api.layer(city.id, "buildings").then((data) => {
-        const raw = data?.features ?? [];
-        buildingsRef.current = raw;
-        blocksRef.current = buildBlockFeatures(raw);
-        const source = map.getSource(
-          "ts-infra-buildings",
-        ) as maplibregl.GeoJSONSource | undefined;
-        source?.setData(fc(blocksRef.current));
+    // Forced preload. Core = the coarse DEM + coarse imagery underlay around
+    // the valley: with it cached, any pan/tilt has *something* to drape (no
+    // holes), so the boot screen waits on it (~90 tiles for Kathmandu).
+    // Detail = sharp DEM and z12-14 imagery, streamed in after the reveal.
+    prefetchAbort.current?.abort();
+    const abort = new AbortController();
+    prefetchAbort.current = abort;
+    // Underlay imagery first: it is what keeps a pan from showing holes, and
+    // Esri answers in ~100 ms where S3 DEM tiles take 1-4 s.
+    const core = [
+      ...tileUrls({
+        template: SATELLITE_TILES[0],
+        bounds: padBounds(target, 1),
+        minzoom: 8,
+        maxzoom: SATELLITE_LO_MAXZOOM,
       }),
+      ...tileUrls({
+        template: GLOBAL_DEM_TILES[0],
+        bounds: padBounds(target, 0.5),
+        minzoom: 8,
+        maxzoom: DEM_MAXZOOM - 1,
+      }),
+    ];
+    const detail = [
+      ...tileUrls({
+        template: GLOBAL_DEM_TILES[0],
+        bounds: padBounds(target, 0.5),
+        minzoom: DEM_MAXZOOM,
+        maxzoom: DEM_MAXZOOM,
+      }),
+      // z12-13 is the sharp fallback the live imagery shows while z15+ tiles
+      // stream in; past this ring the fallback drops to the blurry z11 underlay.
+      ...tileUrls({
+        template: SATELLITE_TILES[0],
+        bounds: padBounds(target, 0.5),
+        minzoom: SATELLITE_LO_MAXZOOM + 1,
+        maxzoom: 13,
+      }),
+      ...tileUrls({ template: SATELLITE_TILES[0], bounds: target, minzoom: 14, maxzoom: 14 }),
+    ];
+    const firstCity = !readyFired.current;
+    const timeout = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+    // Boot progress only ever moves forward, whichever stage lands first.
+    let shown = 0;
+    const report = (fraction: number, stage: string) => {
+      if (!firstCity || fraction <= shown) return;
+      shown = fraction;
+      onLoadProgress?.(fraction, stage);
+    };
+    const corePrefetch = prefetch(core, {
+      signal: abort.signal,
+      onProgress: (f) => report(f * 0.45, "terrain & imagery"),
+    });
+    void corePrefetch.then(() => prefetch(detail, { signal: abort.signal, concurrency: 4 }));
+    setLayersPending(true);
+
+    // Buildings: point the tile source at this city; tiles stream per view.
+    (map.getSource(BUILDINGS) as maplibregl.VectorTileSource | undefined)?.setTiles([
+      buildingTilesUrl(city.id),
+    ]);
+
+    const layersLoaded = Promise.all([
       api.layer(city.id, "rim").then((data) => {
         rimRef.current = data && data.features.length ? data : null;
         const source = map.getSource("ts-valley-rim") as
@@ -793,8 +960,34 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
           features.length ? "visible" : "none",
         );
       }),
-    ]).then(() => scheduleTerrainRefresh(map))
-      .catch((err: unknown) => setError(String(err)));
+    ]);
+    void corePrefetch.then(() => report(0.5, "city layers"));
+    // Drawn = the worker has tiled the new data and the frame has settled;
+    // for Kathmandu's 362k footprints that is most of the wait.
+    const layersDrawn = layersLoaded
+      .then(() => {
+        report(0.8, "building the city");
+        scheduleTerrainRefresh(map);
+        return new Promise<void>((r) => {
+          requestAnimationFrame(() => map.once("idle", () => r()));
+        });
+      })
+      .catch((err: unknown) => setError(String(err)))
+      .finally(() => {
+        if (initializedCity.current === city.id) setLayersPending(false);
+      });
+    if (firstCity) {
+      // Reveal a finished city: imagery cached, layers drawn. Capped so a slow
+      // network still gets in; the in-map chip covers whatever is left.
+      void Promise.race([Promise.all([corePrefetch, layersDrawn]), timeout(20000)]).then(() => {
+        readyFired.current = true;
+        onLoadProgress?.(1, "ready");
+        onReady?.();
+      });
+    }
+    // onReady/onLoadProgress are inline callbacks; the city guard above makes
+    // this run once per city regardless.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [city, setError, mapLoaded]);
 
   // --- selected river highlight + flow direction (flood origin by river) -----
@@ -869,10 +1062,7 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
     if (!map || !mapLoaded) return;
     const setVis = (id: string, on: boolean) =>
       map.setLayoutProperty(id, "visibility", on ? "visible" : "none");
-    setVis(
-      "ts-infra-buildings",
-      showBuildings && showBlocky3d && mode === "existing",
-    );
+    setVis(BUILDINGS, showBuildings && showBlocky3d && mode === "existing");
     setVis("ts-infra-roads", showRoads && mode === "existing");
     setVis("ts-infra-facilities", showFacilities && mode === "existing");
   }, [showRoads, showBuildings, showFacilities, showBlocky3d, mode, mapLoaded]);
@@ -890,12 +1080,7 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !mapLoaded || !city) return;
-    applyTerrain(
-      map,
-      city.id,
-      city.hazard_bounds ?? (city.bounds as [number, number, number, number]),
-      terrain3d,
-    );
+    applyTerrain(map, terrain3d);
     if (terrain3d) scheduleTerrainRefresh(map);
   }, [terrain3d, city, mapLoaded]);
 
@@ -1029,10 +1214,23 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
       pulseData.features.length ? "visible" : "none",
     );
 
-    const buildingSrc = map.getSource("ts-infra-buildings") as
-      | maplibregl.GeoJSONSource
-      | undefined;
-    buildingSrc?.setData(fc(applyBands(blocksRef.current, bandsFromResult(result))));
+    // Tint exposed city blocks through feature state: a repaint, not a
+    // re-upload + re-tile of every footprint (which froze the page ~5 s and
+    // blanked the city while it re-tiled).
+    // Tile features carry the numeric OSM id; other keys can't match a block.
+    const banded = new Set<number>();
+    for (const [key, band] of bandsFromResult(result)) {
+      const id = Number(key);
+      if (!Number.isSafeInteger(id) || id < 0) continue;
+      map.setFeatureState({ source: BUILDINGS, sourceLayer: BUILDINGS_SOURCE_LAYER, id }, { band });
+      banded.add(id);
+    }
+    for (const id of bandedRef.current) {
+      if (!banded.has(id)) {
+        map.removeFeatureState({ source: BUILDINGS, sourceLayer: BUILDINGS_SOURCE_LAYER, id }, "band");
+      }
+    }
+    bandedRef.current = banded;
     scheduleTerrainRefresh(map);
   }, [result, mapLoaded]);
 
@@ -1173,6 +1371,7 @@ export default function MapView({ onReady }: { onReady?: () => void }) {
   return (
     <div className="map-shell">
       <div ref={containerRef} className="map-canvas" />
+      {layersPending && <div className="map-loading-chip">loading city layers…</div>}
       {tip && (
         <div className="building-tip" style={{ left: tip.x, top: tip.y }}>
           {tip.text}

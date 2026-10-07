@@ -62,7 +62,7 @@ function MapHint() {
   return <div className="map-hint">{text}</div>;
 }
 
-function BootScreen() {
+function BootScreen({ loadProgress }: { loadProgress: { fraction: number; stage: string } }) {
   const bootState = useStore((s) => s.bootState);
   const cities = useStore((s) => s.cities);
 
@@ -97,13 +97,22 @@ function BootScreen() {
                 Retry
               </button>
             </>
-          ) : (
+          ) : cities.length === 0 ? (
             <>
               <div className="tagline" style={{ marginTop: 10 }}>
                 connecting to the sim engine at {api.base}…
               </div>
               <div className="pixel-bar">
-                <div style={{ width: "70%" }} />
+                <div style={{ width: "15%" }} />
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="tagline" style={{ marginTop: 10 }}>
+                loading {loadProgress.stage}… {Math.round(loadProgress.fraction * 100)}%
+              </div>
+              <div className="pixel-bar">
+                <div style={{ width: `${Math.max(15, Math.round(loadProgress.fraction * 100))}%` }} />
               </div>
             </>
           )}
@@ -115,6 +124,7 @@ function BootScreen() {
 
 export default function App() {
   const [mapReady, setMapReady] = useState(false);
+  const [loadProgress, setLoadProgress] = useState({ fraction: 0, stage: "terrain & imagery" });
   const city = useStore((s) => s.city);
   const cities = useStore((s) => s.cities);
   const running = useStore((s) => s.running);
@@ -125,8 +135,9 @@ export default function App() {
     <div className="app" style={running ? { cursor: "progress" } : undefined}>
       <Topbar />
       <div className="map-frame">
-        <MapView onReady={() => setMapReady(true)} />
-        {booting && <BootScreen />}
+        <MapView onReady={() => setMapReady(true)} onLoadProgress={(fraction, stage) => setLoadProgress({ fraction, stage })}
+        />
+        {booting && <BootScreen loadProgress={loadProgress} />}
         {!booting && <MapHint />}
         <SidePanel />
         <FacilityChip />

@@ -7,13 +7,15 @@ FastAPI server hosting the simulation + data layer. Run locally:
 
 from __future__ import annotations
 
+import gzip
 import os
+import threading
 
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from app import __version__, datasets
-from app.engine import earthquake, exposure, flood, suitability, terrain_tiles
+from app.engine import building_tiles, earthquake, exposure, flood, suitability, terrain_tiles
 from app.schemas import EarthquakeScenario, FloodScenario, SuitabilityRequest
 
 
@@ -68,6 +70,35 @@ app.add_middleware(
 )
 
 
+def _warm_caches() -> None:
+    """Pre-build what the map's first view asks for, so no visitor pays for it.
+
+    The small layers are gzipped; buildings ship as vector tiles instead (the
+    full 100 MB layer stays reachable but is no longer warmed), so the block
+    index is loaded and the opening-view tiles are encoded up front.
+    """
+    for meta in datasets.list_cities():
+        city_id = meta["id"]
+        for kind in datasets.LAYER_KINDS:
+            if kind == "buildings":
+                continue
+            try:
+                datasets.layer_gzip(city_id, kind)
+            except (FileNotFoundError, ValueError):
+                continue
+        try:
+            building_tiles.city(city_id)
+        except FileNotFoundError:
+            continue
+        wide = meta.get("hazard_bounds") or meta.get("bounds")
+        core = meta.get("bounds") or wide
+        for z, x, y in building_tiles.tiles_over(wide, 13) + building_tiles.tiles_over(core, 14):
+            building_tiles.tile_gzip(city_id, z, x, y)
+
+
+threading.Thread(target=_warm_caches, daemon=True).start()
+
+
 @app.get("/api/health")
 def health() -> dict:
     return {"status": "ok", "version": __version__, "cities": len(datasets.list_cities())}
@@ -87,13 +118,22 @@ def city(city_id: str) -> dict:
 
 
 @app.get("/api/cities/{city_id}/layers/{kind}")
-def city_layer(city_id: str, kind: str) -> dict:
+def city_layer(city_id: str, kind: str, request: Request) -> Response:
     try:
-        return datasets.load_layer(city_id, kind)
+        body, etag = datasets.layer_gzip(city_id, kind)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    # Revalidate every time (bundles can be rebuilt), but a match is a free 304.
+    headers = {"ETag": etag, "Cache-Control": "no-cache", "Vary": "Accept-Encoding"}
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers=headers)
+    if "gzip" in request.headers.get("accept-encoding", ""):
+        headers["Content-Encoding"] = "gzip"
+    else:
+        body = gzip.decompress(body)
+    return Response(content=body, media_type="application/json", headers=headers)
 
 
 @app.get("/api/cities/{city_id}/terrain/{z}/{x}/{y}.png")
@@ -110,6 +150,23 @@ def terrain_tile(city_id: str, z: int, x: int, y: int) -> Response:
         media_type="image/png",
         headers={"Cache-Control": "public, max-age=86400"},
     )
+
+
+@app.get("/api/cities/{city_id}/tiles/buildings/{z}/{x}/{y}.pbf")
+def building_tile(city_id: str, z: int, x: int, y: int, request: Request) -> Response:
+    """Mapbox Vector Tile of the city's estimated 3D building blocks."""
+    try:
+        body = building_tiles.tile_gzip(city_id, z, x, y)
+    except FileNotFoundError:
+        body = b""  # unknown city / no buildings layer: an empty tile, not an error
+    if not body:
+        return Response(status_code=204, headers={"Cache-Control": "public, max-age=3600"})
+    headers = {"Cache-Control": "public, max-age=3600", "Vary": "Accept-Encoding"}
+    if "gzip" in request.headers.get("accept-encoding", ""):
+        headers["Content-Encoding"] = "gzip"
+    else:
+        body = gzip.decompress(body)
+    return Response(content=body, media_type="application/x-protobuf", headers=headers)
 
 
 @app.get("/api/cities/{city_id}/rivers")

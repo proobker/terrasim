@@ -160,5 +160,7 @@ cd frontend && npx tsc --noEmit -p tsconfig.app.json
 
 - Map data © [OpenStreetMap contributors](https://www.openstreetmap.org/copyright)
 - Elevation: Copernicus DEM (contains modified Copernicus Sentinel data) / SRTM
+- 3D map terrain: [Mapzen / AWS Terrain Tiles](https://registry.opendata.aws/terrain-tiles/) (SRTM-derived, global)
+- Satellite imagery © Esri, Maxar, Earthstar Geographics (Esri World Imagery)
 
 This project was built for the hackathon track *Climate Change, Resilience & Sustainability*. See `plans.md` for the full project context.

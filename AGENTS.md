@@ -34,7 +34,7 @@ frontend/
 scripts/fetch_data.py  Overpass (OSM) + Terrarium (DEM) fetch pipeline → data/bundles.
 data/bundles/<city>/ city.json geometry (+ hazard_bounds/valley_cap_m), dem.meta.json + dem.npz,
                      buildings/roads/facilities.geojson, rim.geojson (only when a genuine
-                     valley ring exists for the city)
+                     valley ring exists for the city), buildings.blocks.npz (derived; see gotchas)
 ```
 
 ## Commands (definition of done)
@@ -53,6 +53,7 @@ data/bundles/<city>/ city.json geometry (+ hazard_bounds/valley_cap_m), dem.meta
 - Water: OSM waterways arrive chopped into hundreds of fragments; `normalize_water()` merges them (union–find on snap-connectivity, same-stem gaps ≤20 km, Devanagari→Latin fuzzy names) into a handful of coherent rivers. `--normalize-water` re-runs just this step offline on the committed bundles (kathmandu = 114 features, pokhara = 210 after merge).
 - Roads use `to_features(..., keep_lines=True)`: always LineString, never closed as Polygon. Polygons are wrapped `[ring]` per GeoJSON. 3-point extras are dropped as ambiguous. Non-Zero passes finalize.
 - Building footprints in `buildings.geojson` are Polygon rings carrying OSM `id` (+ `height`, `building:levels` when tagged) so the frontend extrusions are real footprints with estimated heights and can be tinted per exposed asset.
+- The map never downloads `buildings.geojson` (Kathmandu: 362k footprints, 100 MB). `backend/app/engine/building_tiles.py` serves them as vector tiles (`/api/cities/<id>/tiles/buildings/{z}/{x}/{y}.pbf`, z13–15) from `buildings.blocks.npz`: footprints packed with the estimated height + silhouette tint baked in. The npz is rebuilt automatically when older than `buildings.geojson` or when `CACHE_VERSION` changes, but that costs ~10 s and ~900 MB of RAM (more than Render's free tier). **Commit the regenerated npz with the bundle** so a deploy only ever loads it (<1 s). Block styling rules (height table, tints) now live only there, and the exposure ids that tint blocks must stay the OSM `id`.
 - `rim.geojson` is written only when the lowland below `valley_cap_m` forms a genuine ring. Open basins (the DEM box connecting to an adjacent plain, e.g. Kathmandu's NW edge) are rejected by the edge-hugging guard — no file, and the frontend hides the "Valley rim" toggle rather than dream up a fake line.
 - `city.json` may carry `hazard_bounds` (wider DEM/sim theatre) + `valley_cap_m`; the frontend fits the map to `hazard_bounds ?? bounds` and the engine clips overlays to `elev < valley_cap_m`.
 

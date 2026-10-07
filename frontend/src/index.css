@@ -454,14 +454,15 @@ input[type="range"].pixel-range {
 .maplibregl-ctrl button .maplibregl-ctrl-icon {
   filter: invert(0.9) sepia(0.35) saturate(3) hue-rotate(130deg);
 }
-.maplibregl-ctrl-attrib {
+.maplibregl-map .maplibregl-ctrl.maplibregl-ctrl-attrib {
   font-family: "Courier New", monospace;
   font-size: 10px;
   background: rgba(7, 29, 24, 0.72);
   color: #9fb6ae;
   border-radius: 8px;
+  padding: 2px 8px;
 }
-.maplibregl-ctrl-attrib a {
+.maplibregl-map .maplibregl-ctrl-attrib a {
   color: #6fe3f0;
 }
 
@@ -496,6 +497,31 @@ input[type="range"].pixel-range {
   letter-spacing: 1px;
   text-transform: uppercase;
   pointer-events: none;
+}
+
+.map-loading-chip {
+  position: absolute;
+  top: 48px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 3;
+  font-family: "Courier New", monospace;
+  font-size: 11px;
+  color: #dff0ec;
+  background: rgba(7, 29, 24, 0.88);
+  border: 2px solid var(--water);
+  border-radius: 8px;
+  padding: 4px 12px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  pointer-events: none;
+  animation: chip-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes chip-pulse {
+  50% {
+    opacity: 0.55;
+  }
 }
 
 .side-panel {
